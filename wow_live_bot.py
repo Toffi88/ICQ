@@ -207,28 +207,20 @@ class WoWBot:
             # Visuelle Kontrolle - Detection View mit Bounding Boxes und Wahrscheinlichkeiten
             if self.show_gui:
                 try:
-                    if detection_frame is not None:
-                        # Berechne Skalierung basierend auf Originalgröße
-                        h, w = detection_frame.shape[:2]
-                        scale = min(DISPLAY_WIDTH / w, DISPLAY_HEIGHT / h)
-                        new_w = int(w * scale)
-                        new_h = int(h * scale)
-                        resized = cv2.resize(detection_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                        cv2.imshow("Detection View", resized)
-                    else:
-                        h, w = frame.shape[:2]
-                        scale = min(DISPLAY_WIDTH / w, DISPLAY_HEIGHT / h)
-                        new_w = int(w * scale)
-                        new_h = int(h * scale)
-                        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                        cv2.imshow("Detection View", resized)
+                    # Berechne Skalierung basierend auf Originalgröße
+                    h, w = detection_frame.shape[:2]
+                    scale = min(DISPLAY_WIDTH / w, DISPLAY_HEIGHT / h)
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    resized = cv2.resize(detection_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                    cv2.imshow("Detection View", resized)
                     
                     if cv2.waitKey(1) & 0xFF == ord('q'): 
                         break
-                except:
+                except Exception as e:
                     # Falls GUI während der Laufzeit fehlschlägt, deaktiviere sie
                     self.show_gui = False
-                    print("GUI deaktiviert.")
+                    print(f"[WARNUNG] GUI deaktiviert: {e}")
 
         if self.show_gui:
             try:
