@@ -45,7 +45,12 @@ class HumanInput:
         self.deadzone = 30 
         
         # Geschwindigkeit: Wie aggressiv dreht sich der Bot? (Niedriger = langsamer)
-        self.speed_factor = 0.15  # Deutlich langsamer für präzisere Bewegungen 
+        self.speed_factor = 0.15  # Deutlich langsamer für präzisere Bewegungen
+        
+        # Vertikale Steuerung: Weniger präzise, nur um Ziel in oberer Hälfte zu halten
+        self.vertical_deadzone = 100  # Große Deadzone für vertikale Bewegung
+        self.vertical_speed_factor = 0.08  # Langsamer für weniger präzise Bewegung
+        self.upper_half_threshold = 0.5  # Ziel sollte in oberen 50% des Bildschirms sein 
         
         # Status der rechten Maustaste
         self.rmb_held = False
@@ -160,8 +165,14 @@ class HumanInput:
             self.rmb_held = False
             time.sleep(random.uniform(0.05, 0.1))
 
-    def move_mouse_human(self, target_x):
-        """Bewegt die Maus horizontal Richtung Ziel mit menschlicher Beschleunigung."""
+    def move_mouse_human(self, target_x, target_y=None, scan_region=None):
+        """Bewegt die Maus horizontal und vertikal Richtung Ziel mit menschlicher Beschleunigung.
+        
+        Args:
+            target_x: Absolute X-Koordinate des Ziels (präzise Steuerung)
+            target_y: Absolute Y-Koordinate des Ziels (optional, weniger präzise - nur obere Hälfte)
+            scan_region: Scan-Region als (left, top, right, bottom) Tupel (optional, für obere Grenze-Erkennung)
+        """
         # WICHTIG: Prüfe zuerst, ob der Benutzer eingreift
         if self.check_user_intervention():
             # Benutzer benutzt die Maus - pausiere den Bot
@@ -213,9 +224,57 @@ class HumanInput:
         jitter = random.randint(-2, 2)
         move_x += jitter
 
-        # 5. Vertikaler Jitter (optional, macht es realistischer)
-        # Niemand bewegt die Maus perfekt horizontal.
-        move_y = random.randint(-1, 1)
+        # 5. Vertikale Steuerung (weniger präzise - nur obere Hälfte)
+        move_y = 0
+        if target_y is not None:
+            screen_mid_y = self.center_y  # Mitte des Bildschirms
+            offset_y = target_y - screen_mid_y
+            
+            # Prüfe zuerst, ob das Ziel sehr hoch im Scan-Bildschirm ist (obere 20% der Scan-Region)
+            # Wenn ja, bewege nach unten (positiv), damit die Kamera nach oben schwenkt
+            # und das Ziel mehr in die Mitte kommt
+            if scan_region is not None:
+                left, top, right, bottom = scan_region
+                scan_region_height = bottom - top
+                
+                # Berechne relative Position des Ziels innerhalb der Scan-Region
+                # 0.0 = ganz oben, 1.0 = ganz unten
+                relative_y_in_region = (target_y - top) / scan_region_height if scan_region_height > 0 else 0.5
+                
+                # Wenn Ziel im oberen 20% der Scan-Region ist (relative_y < 0.20)
+                if relative_y_in_region < 0.20:
+                    # Ziel ist sehr hoch - bewege nach oben (negativ), damit Kamera nach oben schwenkt
+                    # Berechne Distanz vom oberen Rand (je näher am Rand, desto stärker die Bewegung)
+                    distance_from_top = relative_y_in_region * scan_region_height
+                    # Umso näher am oberen Rand (kleiner distance_from_top), desto stärker bewegen
+                    # Negativ = nach oben (Kamera schwenkt nach oben)
+                    move_y = int(-(0.20 - relative_y_in_region) * scan_region_height * self.vertical_speed_factor * 2)
+                    
+                    # Begrenzung für vertikale Bewegung nach oben (negativ)
+                    max_vertical_step = 15
+                    move_y = max(min(move_y, -3), -max_vertical_step)  # Immer nach oben (negativ), mindestens 3 Pixel
+            
+            # Wenn nicht zu weit oben, prüfe ob Ziel in unterer Hälfte
+            if move_y == 0:  # Nur wenn wir noch keine Bewegung berechnet haben
+                # Nur bewegen, wenn Ziel in unterer Hälfte (positive offset_y bedeutet unten)
+                if offset_y > 0:  # Ziel ist unterhalb der Mitte
+                    # Berechne Bewegung nach oben (negativ)
+                    # Weniger präzise: größere Deadzone, langsamere Bewegung
+                    if abs(offset_y) > self.vertical_deadzone:
+                        move_y = int(-offset_y * self.vertical_speed_factor)  # Negativ = nach oben
+                        
+                        # Begrenzung für vertikale Bewegung (weniger aggressiv)
+                        max_vertical_step = 15  # Maximal 15 Pixel pro Tick
+                        move_y = max(min(move_y, -2), -max_vertical_step)  # Immer nach oben, mindestens 2 Pixel
+                    else:
+                        # Innerhalb der Deadzone - kleine zufällige Bewegung für Realismus
+                        move_y = random.randint(-1, 0)
+                else:
+                    # Ziel ist bereits in oberer Hälfte - nur kleiner Jitter
+                    move_y = random.randint(-1, 1)
+        else:
+            # Kein target_y - nur kleiner Jitter für Realismus
+            move_y = random.randint(-1, 1)
 
         # 6. Ausführung
         # Die Taste sollte bereits in Schritt 2 gedrückt sein
@@ -418,6 +477,8 @@ class WoWBot:
             except Exception as e:
                 print(f"[WARNUNG] Konnte Mausposition nicht initialisieren: {e}")
         
+        print("[STATUS] Drücke 'Q' zum Beenden (oder Ctrl+C)")
+        
         while True:
             frame_count += 1
             fps_frame_count += 1
@@ -480,6 +541,7 @@ class WoWBot:
             detection_frame = self.draw_detections(frame, results, offset=(0, 0))
             
             target_x = None  # Reset target
+            target_y = None  # Reset target
             
             if len(results[0].boxes) > 0:
                 # Nimm das Box mit der höchsten Confidence oder das, das der Mitte am nächsten ist
@@ -487,29 +549,47 @@ class WoWBot:
                 box = results[0].boxes[0].xywh[0].cpu().numpy()
                 
                 # Box[0] ist center_x relativ zum aufgenommenen Frame
+                # Box[1] ist center_y relativ zum aufgenommenen Frame
                 # Wir müssen den Offset der Region beachten!
                 # Da scan_region = adjust_region_for_scanning(region) ist, 
                 # müssen wir die absolute Bildschirmposition berechnen.
                 
                 local_center_x = float(box[0])
+                local_center_y = float(box[1])
+                
                 # Absolutes X auf dem Monitor = Region Links + Lokales X
                 absolute_target_x = scan_region[0] + local_center_x
+                # Absolutes Y auf dem Monitor = Region Top + Lokales Y
+                absolute_target_y = scan_region[1] + local_center_y
                 
                 target_x = absolute_target_x
+                target_y = absolute_target_y
                 
                 # Visualisierung
-                center_y = float(box[1])
                 conf = float(results[0].boxes[0].conf[0].cpu().numpy())
-                print(f"[DETECTION] Ziel gefunden bei ({local_center_x:.1f}, {center_y:.1f}), Conf: {conf:.2f}")
+                print(f"[DETECTION] Ziel gefunden bei ({local_center_x:.1f}, {local_center_y:.1f}), Conf: {conf:.2f}")
             else:
                 # Optional: TAB drücken wenn nichts gefunden
                 pass
             
             # --- HIER KOMMT DIE BEWEGUNG REIN ---
-            # Wir übergeben die absolute X-Koordinate des Ziels. 
+            # Wir übergeben die absolute X- und Y-Koordinate des Ziels. 
             # Die Klasse weiß selbst, wo die Bildschirmmitte ist.
-            self.human_input.move_mouse_human(target_x)
+            # X ist präzise, Y ist weniger präzise (nur obere Hälfte).
+            # Übergebe auch die gesamte Scan-Region für obere Grenze-Erkennung
+            self.human_input.move_mouse_human(target_x, target_y, scan_region)
 
+            # Prüfe Q-Taste zum Beenden (funktioniert auch ohne GUI)
+            should_exit = False
+            if WIN32_AVAILABLE:
+                try:
+                    # Prüfe ob Q-Taste gedrückt ist (VK_Q = 0x51)
+                    q_pressed = win32api.GetAsyncKeyState(0x51) & 0x8000 != 0
+                    if q_pressed:
+                        should_exit = True
+                except:
+                    pass
+            
             # Visuelle Kontrolle - Detection View mit Bounding Boxes und Wahrscheinlichkeiten
             if self.show_gui:
                 try:
@@ -537,11 +617,16 @@ class WoWBot:
                     cv2.imshow("Detection View", resized)
                     
                     if cv2.waitKey(1) & 0xFF == ord('q'): 
-                        break
+                        should_exit = True
                 except Exception as e:
                     # Falls GUI während der Laufzeit fehlschlägt, deaktiviere sie
                     self.show_gui = False
                     print(f"[WARNUNG] GUI deaktiviert: {e}")
+            
+            # Beende Schleife wenn Q gedrückt wurde
+            if should_exit:
+                print("\n[STATUS] Q-Taste gedrückt - Bot wird beendet...")
+                break
 
         if self.show_gui:
             try:
