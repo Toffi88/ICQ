@@ -6,6 +6,16 @@ import pydirectinput
 import time
 import pygetwindow as gw
 from ultralytics import YOLO
+import random
+import math
+
+# Windows API für Mausstatus-Prüfung
+try:
+    import win32api
+    WIN32_AVAILABLE = True
+except ImportError:
+    WIN32_AVAILABLE = False
+    print("[WARNUNG] win32api nicht verfügbar. Benutzer-Interventionserkennung deaktiviert.")
 
 # --- KONFIGURATION ---
 WINDOW_TITLE = "World of Warcraft"
@@ -22,6 +32,215 @@ print(f"[STATUS] Script-Verzeichnis: {script_dir}")
 print("[STATUS] Lade Modell: White Skull...")
 model_white_skull = YOLO(os.path.join(script_dir, r"runs\detect\Google_Skull1\weights\best.pt"))
 print("[STATUS] White Skull Modell geladen!")
+
+
+
+class HumanInput:
+    def __init__(self):
+        # Konfiguration der "Menschlichkeit"
+        self.center_x = 0  # Wird später gesetzt
+        self.center_y = 0
+        
+        # Deadzone: Wenn das Ziel innerhalb von X Pixeln ist, nichts tun (verhindert Zittern)
+        self.deadzone = 30 
+        
+        # Geschwindigkeit: Wie aggressiv dreht sich der Bot? (Niedriger = langsamer)
+        self.speed_factor = 0.15  # Deutlich langsamer für präzisere Bewegungen 
+        
+        # Status der rechten Maustaste
+        self.rmb_held = False
+        
+        # Benutzer-Interventionserkennung
+        self.last_mouse_pos = None
+        self.last_bot_move_time = 0
+        self.user_intervening = False
+        self.intervention_start_time = 0  # Zeitpunkt, zu dem die Intervention begann
+        self.intervention_timeout = 0.3  # Sekunden, nach denen wir annehmen, dass der Benutzer fertig ist
+        
+        # DirectInput Konfiguration für schnellere Reaktion
+        pydirectinput.PAUSE = 0.001 
+        pydirectinput.FAILSAFE = False
+
+    def update_center(self, w, h):
+        self.center_x = w // 2
+        self.center_y = h // 2
+    
+    def _get_mouse_state(self):
+        """Holt den aktuellen Status der Maus (Position und Tasten) von Windows."""
+        if not WIN32_AVAILABLE:
+            return None, None
+        
+        try:
+            pos = win32api.GetCursorPos()
+            # Prüfe rechte Maustaste: VK_RBUTTON = 0x02
+            rmb_pressed = win32api.GetAsyncKeyState(0x02) & 0x8000 != 0
+            return pos, rmb_pressed
+        except Exception as e:
+            return None, None
+    
+    def check_user_intervention(self):
+        """Prüft, ob der Benutzer die Maus benutzt. Gibt True zurück, wenn der Bot pausieren sollte."""
+        if not WIN32_AVAILABLE:
+            return False
+        
+        current_pos, rmb_pressed = self._get_mouse_state()
+        
+        if current_pos is None:
+            return False
+        
+        current_time = time.time()
+        
+        # Wenn wir gerade eine Bewegung gemacht haben (innerhalb von 150ms), 
+        # aktualisiere die erwartete Position und synchronisiere den Status
+        if current_time - self.last_bot_move_time < 0.15:  # Innerhalb von 150ms nach Bot-Bewegung
+            self.last_mouse_pos = current_pos
+            # Synchronisiere den Status der rechten Maustaste
+            if rmb_pressed != self.rmb_held:
+                self.rmb_held = rmb_pressed
+            # Wenn wir gerade eine Bot-Bewegung gemacht haben, ist es keine Intervention
+            if self.user_intervening:
+                self.user_intervening = False
+                self.intervention_start_time = 0
+            return False
+        
+        # Prüfe auf unerwartete Mausbewegung (nur wenn wir NICHT gerade eine Bot-Bewegung gemacht haben)
+        if self.last_mouse_pos is not None:
+            dx = abs(current_pos[0] - self.last_mouse_pos[0])
+            dy = abs(current_pos[1] - self.last_mouse_pos[1])
+            
+            # Wenn die Maus sich mehr als 10 Pixel bewegt hat (ohne Bot-Bewegung), 
+            # hat wahrscheinlich der Benutzer eingegriffen
+            if dx > 10 or dy > 10:
+                if not self.user_intervening:
+                    # Neue Intervention beginnt
+                    self.intervention_start_time = current_time
+                self.user_intervening = True
+                # Synchronisiere den Status der rechten Maustaste
+                if rmb_pressed != self.rmb_held:
+                    self.rmb_held = rmb_pressed
+                # Aktualisiere die Position, damit wir nicht ständig intervenieren
+                self.last_mouse_pos = current_pos
+                return True
+        
+        # Prüfe auf manuelle Änderung der rechten Maustaste
+        if rmb_pressed != self.rmb_held:
+            # Der Benutzer hat die Taste manuell gedrückt oder losgelassen
+            if not self.user_intervening:
+                self.intervention_start_time = current_time
+            self.user_intervening = True
+            self.rmb_held = rmb_pressed
+            return True
+        
+        # Wenn der Benutzer eingegriffen hat, aber seit einer Weile nichts mehr passiert ist,
+        # nehmen wir an, dass er fertig ist
+        if self.user_intervening:
+            # Verwende intervention_start_time statt last_bot_move_time
+            if self.intervention_start_time > 0:
+                time_since_intervention = current_time - self.intervention_start_time
+                if time_since_intervention > self.intervention_timeout:
+                    # Intervention beendet - Bot kann weitermachen
+                    self.user_intervening = False
+                    self.intervention_start_time = 0
+                    self.last_mouse_pos = current_pos
+                    return False
+            return True
+        
+        # Aktualisiere die letzte bekannte Position
+        self.last_mouse_pos = current_pos
+        return False
+
+    def _hold_rmb(self, hold=True):
+        """Verwaltet den Rechtsklick-Status intelligent."""
+        if hold and not self.rmb_held:
+            pydirectinput.mouseDown(button='right')
+            self.rmb_held = True
+            time.sleep(random.uniform(0.05, 0.1)) # Kurze Pause wie beim echten Drücken
+        elif not hold and self.rmb_held:
+            pydirectinput.mouseUp(button='right')
+            self.rmb_held = False
+            time.sleep(random.uniform(0.05, 0.1))
+
+    def move_mouse_human(self, target_x):
+        """Bewegt die Maus horizontal Richtung Ziel mit menschlicher Beschleunigung."""
+        # WICHTIG: Prüfe zuerst, ob der Benutzer eingreift
+        if self.check_user_intervention():
+            # Benutzer benutzt die Maus - pausiere den Bot
+            return
+        
+        if target_x is None:
+            # Ziel verloren? Taste NICHT sofort loslassen, sondern kurz halten
+            # und dann langsam loslassen, um nicht ruckartig zu stoppen
+            # Wir lassen die Taste nur los, wenn wir länger kein Ziel haben
+            # (wird durch wiederholte Aufrufe mit None gehandhabt)
+            if self.rmb_held:
+                # Nur loslassen, wenn wir mehrere Frames kein Ziel haben
+                # Für jetzt halten wir die Taste, damit die Kamera nicht ruckartig stoppt
+                pass
+            return
+
+        offset_x = target_x - self.center_x
+        distance = abs(offset_x)
+
+        # 1. Deadzone Check: Sind wir nah genug? Dann chillen.
+        if distance < self.deadzone:
+            # Im Ziel - Taste kann gehalten bleiben für sanfte Bewegung
+            # Oder loslassen für präzises Zielen (kommentiert aus)
+            # self._hold_rmb(False) 
+            return
+
+        # 2. Taste drücken - WICHTIG: Immer vor der Bewegung
+        self._hold_rmb(True)
+
+        # 3. Berechnung der Bewegung (Humanizing Math)
+        # Wir nutzen eine Wurzel- oder Log-Funktion, damit weite Distanzen schnell
+        # und kurze Distanzen langsam sind.
+        # Formel: (Offset * Speed) + Random Noise
+        
+        # Basis-Geschwindigkeit (Progressiv)
+        move_x = int(offset_x * self.speed_factor)
+        
+        # Begrenzung (Clamping), damit sich der Char nicht im Kreis dreht wie verrückt
+        max_step = 20  # Maximale Pixel pro "Tick" - deutlich reduziert
+        move_x = max(min(move_x, max_step), -max_step)
+
+        # Wenn wir sehr nah sind, erzwinge kleine Schritte, sonst bleiben wir stecken
+        if abs(move_x) < 1:
+            move_x = 1 if offset_x > 0 else -1
+
+        # 4. Zufällige Varianz (Jitter)
+        # Menschen ziehen die Maus nie perfekt gerade.
+        # Wir fügen manchmal etwas mehr oder weniger hinzu.
+        jitter = random.randint(-2, 2)
+        move_x += jitter
+
+        # 5. Vertikaler Jitter (optional, macht es realistischer)
+        # Niemand bewegt die Maus perfekt horizontal.
+        move_y = random.randint(-1, 1)
+
+        # 6. Ausführung
+        # Die Taste sollte bereits in Schritt 2 gedrückt sein
+        # Kurze Pause, damit das Spiel die Bewegung registriert
+        time.sleep(random.uniform(0.01, 0.02))
+        pydirectinput.moveRel(move_x, move_y, relative=True)
+        
+        # Aktualisiere die Zeit der letzten Bot-Bewegung für Interventionserkennung
+        self.last_bot_move_time = time.time()
+        
+        # Aktualisiere die erwartete Mausposition
+        if WIN32_AVAILABLE:
+            try:
+                current_pos, _ = self._get_mouse_state()
+                if current_pos:
+                    self.last_mouse_pos = current_pos
+            except:
+                pass
+
+        # 7. "Micro-Sleeps" - Das 'Chillen'
+        # Je näher wir am Ziel sind, desto vorsichtiger werden wir.
+        if distance < 100:
+            time.sleep(random.uniform(0.015, 0.030)) # Feinjustierung - länger
+        else:
+            time.sleep(random.uniform(0.010, 0.020)) # Schnellere Drehung - aber immer noch kontrolliert
 
 class WoWBot:
     def __init__(self):
@@ -44,6 +263,9 @@ class WoWBot:
         else:
             print("[STATUS] GUI-Unterstützung: Deaktiviert")
         print("[STATUS] WoWBot initialisiert!")
+
+        # Initialisiere Human Input
+        self.human_input = HumanInput()
     
     def _check_gui_support(self):
         """Prüft ob OpenCV GUI-Funktionen verfügbar sind."""
@@ -181,6 +403,21 @@ class WoWBot:
         latency_start_time = 0.0
         current_latency = 0.0
         
+        # WICHTIG: Setze die Mitte für die HumanInput Klasse, sobald wir die Größe kennen
+        # Da wir dxcam nutzen, ist self.screen_width/height schon da.
+        self.human_input.update_center(self.screen_width, self.screen_height)
+        
+        # Initialisiere die Mausposition für Interventionserkennung
+        if WIN32_AVAILABLE:
+            try:
+                pos, rmb_pressed = self.human_input._get_mouse_state()
+                if pos:
+                    self.human_input.last_mouse_pos = pos
+                    self.human_input.rmb_held = rmb_pressed
+                    print(f"[STATUS] Mausposition initialisiert: {pos}, RMB: {rmb_pressed}")
+            except Exception as e:
+                print(f"[WARNUNG] Konnte Mausposition nicht initialisieren: {e}")
+        
         while True:
             frame_count += 1
             fps_frame_count += 1
@@ -242,16 +479,36 @@ class WoWBot:
             # Visualisierung für Detection View
             detection_frame = self.draw_detections(frame, results, offset=(0, 0))
             
+            target_x = None  # Reset target
+            
             if len(results[0].boxes) > 0:
-                # Nimm das erste gefundene Mark (xywh Format: center_x, center_y, width, height)
+                # Nimm das Box mit der höchsten Confidence oder das, das der Mitte am nächsten ist
+                # Hier nehmen wir einfach das erste (meistens das sicherste)
                 box = results[0].boxes[0].xywh[0].cpu().numpy()
-                center_x = float(box[0])
+                
+                # Box[0] ist center_x relativ zum aufgenommenen Frame
+                # Wir müssen den Offset der Region beachten!
+                # Da scan_region = adjust_region_for_scanning(region) ist, 
+                # müssen wir die absolute Bildschirmposition berechnen.
+                
+                local_center_x = float(box[0])
+                # Absolutes X auf dem Monitor = Region Links + Lokales X
+                absolute_target_x = scan_region[0] + local_center_x
+                
+                target_x = absolute_target_x
+                
+                # Visualisierung
                 center_y = float(box[1])
                 conf = float(results[0].boxes[0].conf[0].cpu().numpy())
-                print(f"[DETECTION] Ziel gefunden bei ({center_x:.1f}, {center_y:.1f}), Conf: {conf:.2f}")
+                print(f"[DETECTION] Ziel gefunden bei ({local_center_x:.1f}, {center_y:.1f}), Conf: {conf:.2f}")
             else:
                 # Optional: TAB drücken wenn nichts gefunden
                 pass
+            
+            # --- HIER KOMMT DIE BEWEGUNG REIN ---
+            # Wir übergeben die absolute X-Koordinate des Ziels. 
+            # Die Klasse weiß selbst, wo die Bildschirmmitte ist.
+            self.human_input.move_mouse_human(target_x)
 
             # Visuelle Kontrolle - Detection View mit Bounding Boxes und Wahrscheinlichkeiten
             if self.show_gui:
