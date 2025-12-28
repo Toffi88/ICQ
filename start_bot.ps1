@@ -1,8 +1,8 @@
 # WoW Hybrid-Logic Bot Startskript
-# Aktiviert die venv_new und startet den Bot
+# Aktiviert die venv und startet den Bot
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-$venvPath = Join-Path $scriptPath "venv_new"
+$venvPath = Join-Path $scriptPath "venv"
 $botScript = Join-Path $scriptPath "wow_live_bot.py"
 
 if (Test-Path $venvPath) {
@@ -15,7 +15,7 @@ if (Test-Path $venvPath) {
     
     python "$botScript"
 } else {
-    Write-Host "Fehler: venv_new nicht gefunden!" -ForegroundColor Red
+    Write-Host "Fehler: venv nicht gefunden!" -ForegroundColor Red
     Write-Host "Bitte führe zuerst die Installation durch." -ForegroundColor Red
     exit 1
 }

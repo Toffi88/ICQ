@@ -22,7 +22,6 @@ wheels/
 
 # Virtual Environments
 venv/
-venv_new/
 venv_old_backup/
 ENV/
 env/

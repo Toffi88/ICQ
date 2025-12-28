@@ -87,8 +87,6 @@ class WoWBot:
             
             # Validiere die Region
             validated_region = self.validate_region(region)
-            if validated_region != region:
-                print(f"[WARNUNG] Region korrigiert: {region} -> {validated_region}")
             
             return validated_region
         except Exception as e:
@@ -141,6 +139,28 @@ class WoWBot:
         
         return display_frame
 
+    def adjust_region_for_scanning(self, region):
+        """Passt die Region an, um obere 5% und untere 15% auszuschließen."""
+        if region is None:
+            return None
+        
+        left, top, right, bottom = region
+        region_height = bottom - top
+        
+        # Berechne die auszuschließenden Bereiche
+        exclude_top = int(region_height * 0.05)  # Obere 5%
+        exclude_bottom = int(region_height * 0.15)  # Untere 15%
+        
+        # Neue Region: top erhöhen, bottom verringern
+        new_top = top + exclude_top
+        new_bottom = bottom - exclude_bottom
+        
+        # Sicherstellen, dass die neue Region gültig ist
+        if new_bottom <= new_top:
+            return region  # Falls ungültig, Original zurückgeben
+        
+        return (left, new_top, right, new_bottom)
+
     def run(self):
         print("[STATUS] ========================================")
         print("[STATUS] Bot gestartet!")
@@ -152,10 +172,29 @@ class WoWBot:
         frame_count = 0
         print("[STATUS] Starte Hauptschleife...")
         
+        # FPS-Berechnung
+        fps_start_time = time.time()
+        fps_frame_count = 0
+        current_fps = 0.0
+        
+        # Verzögerungsmessung
+        latency_start_time = 0.0
+        current_latency = 0.0
+        
         while True:
             frame_count += 1
+            fps_frame_count += 1
+            
+            # FPS berechnen (alle Sekunde aktualisieren)
+            if fps_frame_count >= 30:  # Alle 30 Frames aktualisieren
+                elapsed = time.time() - fps_start_time
+                if elapsed > 0:
+                    current_fps = fps_frame_count / elapsed
+                fps_start_time = time.time()
+                fps_frame_count = 0
+            
             if frame_count % 30 == 0:  # Alle 30 Frames einen Status
-                print(f"[STATUS] Läuft... (Frame {frame_count})")
+                print(f"[STATUS] Läuft... (Frame {frame_count}, FPS: {current_fps:.1f}, Latenz: {current_latency*1000:.1f}ms)")
             
             region = self.get_wow_region()
             if not region:
@@ -164,17 +203,24 @@ class WoWBot:
                 time.sleep(2)
                 continue
 
+            # Region für Scanning anpassen (obere 5% und untere 15% ausschließen)
+            scan_region = self.adjust_region_for_scanning(region)
+
             if frame_count == 1:
                 print(f"[STATUS] WoW-Fenster gefunden! Region: {region}")
+                print(f"[STATUS] Scan-Region (ohne obere 5% und untere 15%): {scan_region}")
                 print(f"[STATUS] Region-Validierung: left={region[0]}, top={region[1]}, right={region[2]}, bottom={region[3]}")
                 print(f"[STATUS] Bildschirmgrenzen: 0-{self.screen_width} x 0-{self.screen_height}")
                 print("[STATUS] Starte Bildaufnahme...")
 
+            # Verzögerungsmessung starten
+            latency_start_time = time.time()
+            
             try:
-                frame = self.camera.grab(region=region)
+                frame = self.camera.grab(region=scan_region)
             except ValueError as e:
                 print(f"[FEHLER] Ungültige Region für DXCAM: {e}")
-                print(f"[FEHLER] Region war: {region}")
+                print(f"[FEHLER] Region war: {scan_region}")
                 print(f"[FEHLER] Bildschirmauflösung: {self.screen_width}x{self.screen_height}")
                 time.sleep(2)
                 continue
@@ -189,6 +235,9 @@ class WoWBot:
 
             # Suche nach Ziel im gesamten Bild
             results = self.active_model.predict(frame, imgsz=SEARCH_IMGSZ, conf=CONF_THRESHOLD, verbose=False)
+            
+            # Verzögerungsmessung beenden
+            current_latency = time.time() - latency_start_time
             
             # Visualisierung für Detection View
             detection_frame = self.draw_detections(frame, results, offset=(0, 0))
@@ -207,6 +256,21 @@ class WoWBot:
             # Visuelle Kontrolle - Detection View mit Bounding Boxes und Wahrscheinlichkeiten
             if self.show_gui:
                 try:
+                    # FPS und Latenz auf Frame zeichnen
+                    fps_text = f"FPS: {current_fps:.1f}"
+                    latency_text = f"Latenz: {current_latency*1000:.1f}ms"
+                    
+                    # Hintergrund für Text
+                    cv2.rectangle(detection_frame, (10, 10), (250, 70), (0, 0, 0), -1)
+                    
+                    # FPS-Text
+                    cv2.putText(detection_frame, fps_text, (15, 35), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Latenz-Text
+                    cv2.putText(detection_frame, latency_text, (15, 60), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    
                     # Berechne Skalierung basierend auf Originalgröße
                     h, w = detection_frame.shape[:2]
                     scale = min(DISPLAY_WIDTH / w, DISPLAY_HEIGHT / h)
