@@ -20,13 +20,22 @@ HAUPTFUNKTIONEN:
    - Stoppt wenn Target in MELEE_RANGE (Grün) oder IN_RANGE (Blau)
    - Range-Status wird aus WeakAura-Farbe gelesen
 
-4. Target-Suche-Logik:
+4. Target-Suche-Logik (State-Machine, nicht-blockierend):
    - Schwarz in WeakAura = kein Target → Tab drücken
    - Nach Tab weiterhin Schwarz → ~30° Drehung → erneut Tab
    - Farbwechsel von Schwarz → F1 drücken (setzt Mark auf Target)
    - Wenn YOLO 5x kein Mark findet trotz Target → Drehung
+   - Nahtlose Rotation über mehrere Frames (15-20 Schritte)
+   - Minimale Wartezeiten für schnelle, flüssige Bewegung
 
-5. Benutzer-Interventionserkennung:
+5. Kampf-Rotationen (combat.py):
+   - MeleeRotation: Taste 2 für MELEE_RANGE (Grün)
+   - RangeRotation: Taste 3 für IN_RANGE (Blau)
+   - Automatischer Wechsel zwischen Rotationen basierend auf Range-State
+   - Rotation nur wenn Target in Deadzone (wie W-Taste)
+   - Zufällige Timing-Variationen (0.9-1.1 Sekunden) für menschliche Wirkung
+
+6. Benutzer-Interventionserkennung:
    - Erkennt wenn Benutzer Maus benutzt → pausiert Bot automatisch
    - Synchronisiert Status der rechten Maustaste
 
@@ -36,13 +45,25 @@ WICHTIGE KONZEPTE:
 - Range-States: OUT_OF_RANGE (Rot), MELEE_RANGE (Grün), IN_RANGE (Blau), NO_TARGET (Schwarz)
 - Target-Search-Mode vs. Tracking-Mode: Zwei Betriebsmodi
 - Smoothe Bewegungen: Reduzierte Geschwindigkeit (speed_factor=0.10, max_step=15)
+- State-Machine: Nicht-blockierende Target-Suche über mehrere Frames
+- Frame-basierte Rotation: Nahtlose Drehung ohne Sleep-Blockierungen
+- Zufällige Variationen: Alle Bewegungen und Zeitangaben enthalten Zufall für menschliche Wirkung
 
 KONFIGURATION:
 -------------
 - WeakAura-Position: weakuara_offset_x, weakuara_offset_y (relativ zur Bildschirmmitte)
-- Bewegungsgeschwindigkeit: speed_factor, max_step
-- Deadzones: deadzone (horizontal), vertical_deadzone, center_deadzone_x
+- Bewegungsgeschwindigkeit: speed_factor=0.10, target_search_speed_factor=0.15 (50% schneller)
+- Deadzones: deadzone (horizontal), vertical_deadzone, center_deadzone_x=120
 - Range-Schwellenwerte: In get_range_state_from_color() definiert
+- Tab-Delay: 0.1 Sekunden (reduziert für schnellere Suche)
+- Rotation-Schritte: 15-20 für nahtlose Bewegung
+
+PERFORMANCE-OPTIMIERUNGEN:
+--------------------------
+- Keine blockierenden Sleeps während Target-Suche (0 FPS-Einbruch)
+- State-Machine verteilt Wartezeiten über mehrere Frames
+- Minimale Wartezeiten (0.05s) für nahtlose Bewegung
+- Lineare Interpolation für flüssigere Rotation
 
 ================================================================================
 """
@@ -122,7 +143,7 @@ class HumanInput:
         # Target-Suche-State-Management
         self.target_search_mode = True  # True = Suche Target, False = Tracking-Modus
         self.last_tab_press_time = 0  # Zeitpunkt des letzten Tab-Drucks
-        self.tab_press_delay = 0.5  # Mindestabstand zwischen Tab-Drücken (Sekunden)
+        self.tab_press_delay = 0.1  # Mindestabstand zwischen Tab-Drücken (reduziert für schnellere Suche)
         self.rotation_count = 0  # Anzahl der 90°-Drehungen bei Target-Suche
         self.max_rotations = 4  # Maximale Anzahl 90°-Drehungen (360°)
         self.rotation_direction = 1  # 1 = rechts, -1 = links
@@ -132,6 +153,14 @@ class HumanInput:
         
         # YOLO-Detection-Zähler: Zählt wie oft hintereinander kein Mark gefunden wurde trotz Target
         self.no_yolo_detection_count = 0  # Zähler für fehlende YOLO-Detection
+        
+        # State-Machine für nicht-blockierende Target-Suche
+        self.search_state = "idle"  # "idle", "waiting_after_tab", "check_rotation", "rotating", "waiting_after_rotation"
+        self.search_state_time = 0  # Zeitpunkt des letzten State-Wechsels
+        self.rotation_step = 0  # Aktueller Schritt der Drehung (0 = nicht aktiv)
+        self.rotation_total_steps = 0  # Gesamtzahl der Schritte für aktuelle Drehung
+        self.rotation_virtual_target_x = 0  # Ziel-X für aktuelle Drehung
+        self.rotation_virtual_target_y = 0  # Ziel-Y für aktuelle Drehung
         
         # Combat-Rotationen (werden in update_center initialisiert)
         self.melee_rotation = None
@@ -254,11 +283,15 @@ class HumanInput:
         if hold and not self.rmb_held:
             pydirectinput.mouseDown(button='right')
             self.rmb_held = True
-            time.sleep(random.uniform(0.05, 0.1)) # Kurze Pause wie beim echten Drücken
+            # Keine Pause während Target-Suche für kontinuierliche Bewegung
+            if not self.target_search_mode:
+                time.sleep(random.uniform(0.05, 0.1))  # Pause nur außerhalb der Suche
         elif not hold and self.rmb_held:
             pydirectinput.mouseUp(button='right')
             self.rmb_held = False
-            time.sleep(random.uniform(0.05, 0.1))
+            # Keine Pause während Target-Suche für kontinuierliche Bewegung
+            if not self.target_search_mode:
+                time.sleep(random.uniform(0.05, 0.1))  # Pause nur außerhalb der Suche
     
     def press_tab_key(self):
         """Drückt die Tab-Taste einmal für Target-Suche."""
@@ -270,7 +303,9 @@ class HumanInput:
             print("[TARGET-SUCHE] Drücke Tab-Taste...")
             pydirectinput.press('tab')
             self.last_tab_press_time = current_time
-            time.sleep(random.uniform(0.1, 0.2))  # Kurze Pause nach Tab
+            # Keine Pause während Target-Suche für kontinuierliche Bewegung
+            if not self.target_search_mode:
+                time.sleep(random.uniform(0.1, 0.2))  # Pause nur außerhalb der Suche
         except Exception as e:
             print(f"[TARGET-SUCHE] Fehler beim Drücken der Tab-Taste: {e}")
     
@@ -318,76 +353,73 @@ class HumanInput:
         # Führe Bewegung aus
         pydirectinput.moveRel(move_x, move_y, relative=True)
         
-        # Längere Pause für smoothere Bewegung
-        time.sleep(random.uniform(0.020, 0.030))  # Erhöht von 0.015-0.025
+        # Keine Pause während Target-Suche für kontinuierliche Bewegung
+        if not self.target_search_mode:
+            time.sleep(random.uniform(0.020, 0.030))  # Normale Pause nur außerhalb der Suche
     
-    def rotate_90_degrees(self, scan_region=None):
-        """Dreht den Charakter um ca. 45 Grad (menschlich wirkend) mit dem bestehenden Bewegungsmodul.
-        
-        Args:
-            scan_region: Optional, Scan-Region für Koordinatenberechnung
-        """
+    def _start_rotation(self):
+        """Startet eine Rotation (initialisiert State-Variablen für Frame-basierte Drehung)."""
         try:
-            # Immer in eine Richtung drehen (nicht wechseln)
-            # Standard: rechts (positive Richtung)
-            rotation_direction = 1  # Immer rechts
-            
-            print(f"[TARGET-SUCHE] Drehe um ~30° (rechts)...")
+            print(f"[TARGET-SUCHE] Starte Drehung um ~30° (rechts)...")
             
             # Berechne virtuelle Target-Position außerhalb des Bildschirms für Drehung
-            # Weitere 30% Reduzierung: Etwa 10-15% der Bildschirmbreite seitlich (für ~30°)
-            rotation_distance = int(self.center_x * random.uniform(0.10, 0.15))  # 30% weniger als vorher (~30°)
+            rotation_distance = int(self.center_x * random.uniform(0.10, 0.15))
             
-            # Virtuelle Target-X-Position (immer rechts)
-            virtual_target_x = self.center_x + rotation_distance
+            # Virtuelle Target-Positionen
+            self.rotation_virtual_target_x = self.center_x + rotation_distance
+            self.rotation_virtual_target_y = self.center_y + random.randint(-50, 50)
             
-            # Y-Position bleibt in der Mitte (horizontale Drehung)
-            virtual_target_y = self.center_y + random.randint(-50, 50)  # Leichte Variation
+            # Anzahl der Schritte für nahtlose Bewegung (mehr Schritte = flüssiger)
+            self.rotation_total_steps = random.randint(15, 20)  # Erhöht für nahtlosere Rotation
+            self.rotation_step = 0
             
-            # Führe Drehung in mehreren kleinen Schritten aus (menschlich wirkend)
-            steps = random.randint(8, 12)  # Anzahl der Schritte für sanfte Bewegung
-            
-            for step in range(steps):
-                # Berechne Fortschritt (0.0 bis 1.0)
-                progress = step / steps
+            # Drücke rechte Maustaste für Kameradrehung
+            if not self.rmb_held:
+                self._hold_rmb(True)
                 
-                # Interpoliere zwischen aktueller Position und Zielposition
-                # Nutze eine Easing-Funktion für natürlichere Bewegung
-                eased_progress = progress * progress  # Quadratische Easing (langsam starten, schneller werden)
-                
-                current_target_x = self.center_x + (virtual_target_x - self.center_x) * eased_progress
-                current_target_y = self.center_y + (virtual_target_y - self.center_y) * eased_progress
-                
-                # Nutze das bestehende Bewegungsmodul für diese Position
-                # Aber ohne Deadzone-Check, damit wir uns wirklich drehen
-                offset_x = current_target_x - self.center_x
-                distance = abs(offset_x)
-                
-                # Drücke rechte Maustaste für Kameradrehung
-                if not self.rmb_held:
-                    self._hold_rmb(True)
-                
-                # Nutze die gemeinsame Basis-Funktion für Bewegung
-                move_y = random.randint(-1, 1)  # Leichte vertikale Variation
-                self._execute_mouse_movement(offset_x, move_y, use_smoothing=True)
-            
-            # Lasse rechte Maustaste los
-            if self.rmb_held:
-                self._hold_rmb(False)
-            
-            self.rotation_count += 1
-            
-            # Immer in die gleiche Richtung drehen (kein Wechsel)
-            # rotation_direction bleibt unverändert
-            
-            # Längere Pause nach Drehung, damit YOLO Zeit hat, das Mark zu finden
-            print("[TARGET-SUCHE] Warte auf Mark-Erkennung nach Drehung...")
-            time.sleep(random.uniform(1.0, 1.5))  # 1-1.5 Sekunden Pause für Mark-Erkennung
-            
         except Exception as e:
-            print(f"[TARGET-SUCHE] Fehler bei 90°-Drehung: {e}")
+            print(f"[TARGET-SUCHE] Fehler beim Starten der Drehung: {e}")
             import traceback
             traceback.print_exc()
+            self.rotation_step = 0
+            self.search_state = "idle"
+    
+    def _execute_rotation_step(self):
+        """Führt einen Schritt der Rotation aus (wird pro Frame aufgerufen)."""
+        try:
+            if self.rotation_step >= self.rotation_total_steps:
+                return
+            
+            # Berechne Fortschritt (0.0 bis 1.0)
+            progress = self.rotation_step / self.rotation_total_steps
+            
+            # Lineare Interpolation für nahtlosere Bewegung (statt quadratischer Easing)
+            # Dies macht die Bewegung gleichmäßiger und flüssiger
+            current_target_x = self.center_x + (self.rotation_virtual_target_x - self.center_x) * progress
+            current_target_y = self.center_y + (self.rotation_virtual_target_y - self.center_y) * progress
+            
+            # Berechne Offset
+            offset_x = current_target_x - self.center_x
+            
+            # Führe Bewegung aus
+            move_y = random.randint(-1, 1)  # Leichte vertikale Variation
+            self._execute_mouse_movement(offset_x, move_y, use_smoothing=True)
+            
+            # Nächster Schritt
+            self.rotation_step += 1
+            
+        except Exception as e:
+            print(f"[TARGET-SUCHE] Fehler bei Rotations-Schritt: {e}")
+            self.rotation_step = 0
+            self.search_state = "idle"
+    
+    def rotate_90_degrees(self, scan_region=None):
+        """Veraltete Funktion - wird durch _start_rotation() und _execute_rotation_step() ersetzt.
+        Behalten für Kompatibilität, aber sollte nicht mehr verwendet werden.
+        """
+        # Starte Rotation (wird dann über mehrere Frames ausgeführt)
+        self._start_rotation()
+        self.search_state = "rotating"
     
     def light_camera_rotation(self):
         """Führt eine leichte Kameradrehung aus, um Target zu finden."""
@@ -409,13 +441,15 @@ class HumanInput:
             if self.rmb_held:
                 self._hold_rmb(False)
             
-            time.sleep(random.uniform(0.1, 0.2))
+            # Keine Pause während Target-Suche für kontinuierliche Bewegung
+            if not self.target_search_mode:
+                time.sleep(random.uniform(0.1, 0.2))  # Pause nur außerhalb der Suche
             
         except Exception as e:
             print(f"[TARGET-SUCHE] Fehler bei leichter Kameradrehung: {e}")
     
     def handle_target_search(self, range_state, has_detection):
-        """Verwaltet die Target-Suche-Logik.
+        """Verwaltet die Target-Suche-Logik mit State-Machine (nicht-blockierend).
         
         Args:
             range_state: Aktueller Range-State (kann 'NO_TARGET' sein)
@@ -435,45 +469,76 @@ class HumanInput:
         
         # Prüfe ob kein Target (Schwarz im Range-Bereich)
         no_target = (range_state == 'NO_TARGET')
+        current_time = time.time()
         
         if self.target_search_mode:
-            # Target-Suche-Modus aktiv
+            # Target-Suche-Modus aktiv - State-Machine
             if no_target:
-                # Kein Target gefunden
-                current_time = time.time()
+                # Kein Target gefunden - State-Machine für nicht-blockierende Suche
                 
                 # Prüfe ob F1 kürzlich gedrückt wurde - dann keine weitere Aktion
                 if current_time - self.last_f1_press_time < self.f1_cooldown:
                     # F1 wurde kürzlich gedrückt - warte auf Mark-Erkennung
-                    return  # Keine weitere Aktion, warte auf Mark-Erkennung
+                    self.search_state = "idle"
+                    return
                 
-                # Drücke Tab-Taste (mit Verzögerung)
-                if current_time - self.last_tab_press_time >= self.tab_press_delay:
-                    self.press_tab_key()
-                    time.sleep(0.3)  # Warte kurz auf Ergebnis
-                    
-                    # Prüfe erneut (wird im nächsten Frame gemacht, aber wir können hier schon prüfen)
-                    # Wenn nach Tab immer noch kein Target, drehe um ~45°
-                    if self.rotation_count < self.max_rotations:
-                        # Prüfe erneut, ob F1 kürzlich gedrückt wurde
-                        if time.time() - self.last_f1_press_time < self.f1_cooldown:
-                            return  # F1 wurde gedrückt, warte auf Mark-Erkennung
-                        
-                        # Warte etwas länger, dann drehe
-                        time.sleep(0.5)
-                        self.rotate_90_degrees()
-                        # Nach Drehung erneut Tab drücken
-                        time.sleep(0.3)
+                # State-Machine-Logik
+                if self.search_state == "idle":
+                    # Prüfe ob Tab gedrückt werden kann
+                    if current_time - self.last_tab_press_time >= self.tab_press_delay:
                         self.press_tab_key()
+                        self.search_state = "waiting_after_tab"
+                        self.search_state_time = current_time
+                
+                elif self.search_state == "waiting_after_tab":
+                    # Minimale Wartezeit nach Tab-Druck (nahtlose Bewegung)
+                    if current_time - self.search_state_time >= 0.05:
+                        # Prüfe ob F1 kürzlich gedrückt wurde
+                        if current_time - self.last_f1_press_time < self.f1_cooldown:
+                            self.search_state = "idle"
+                            return
+                        
+                        # Prüfe ob Rotation nötig
+                        if self.rotation_count < self.max_rotations:
+                            # Starte Rotation direkt (keine zusätzliche Wartezeit)
+                            self._start_rotation()
+                            self.search_state = "rotating"
+                        else:
+                            # Maximale Drehungen erreicht, reset
+                            print("[TARGET-SUCHE] Maximale Drehungen erreicht, reset...")
+                            self.rotation_count = 0
+                            self.search_state = "idle"
+                
+                elif self.search_state == "rotating":
+                    # Führe einen Schritt der Rotation aus (wird über mehrere Frames verteilt)
+                    if self.rotation_step >= self.rotation_total_steps:
+                        # Rotation abgeschlossen
+                        if self.rmb_held:
+                            self._hold_rmb(False)
+                        self.rotation_count += 1
+                        self.rotation_step = 0
+                        self.search_state = "waiting_after_rotation"
+                        self.search_state_time = current_time
+                        print("[TARGET-SUCHE] Drehung abgeschlossen, warte auf Mark-Erkennung...")
                     else:
-                        # Maximale Drehungen erreicht, reset
-                        print("[TARGET-SUCHE] Maximale Drehungen erreicht, reset...")
-                        self.rotation_count = 0
+                        # Führe einen Schritt aus
+                        self._execute_rotation_step()
+                
+                elif self.search_state == "waiting_after_rotation":
+                    # Minimale Wartezeit nach Drehung (nahtlose Bewegung)
+                    wait_time = 0.05  # Sehr kurz für nahtlose Rotation
+                    if current_time - self.search_state_time >= wait_time:
+                        # Nach Drehung erneut Tab drücken
+                        self.press_tab_key()
+                        self.search_state = "waiting_after_tab"
+                        self.search_state_time = current_time
             else:
                 # Target gefunden! (kein Schwarz mehr)
                 print("[TARGET-SUCHE] Target gefunden! Wechsle zu Tracking-Modus.")
                 self.target_search_mode = False
                 self.rotation_count = 0  # Reset für nächste Suche
+                self.search_state = "idle"  # Reset State-Machine
+                self.rotation_step = 0  # Reset Rotation
                 
                 # Prüfe ob Target direkt sichtbar (YOLO hat es erkannt)
                 if not has_detection:
@@ -482,12 +547,30 @@ class HumanInput:
                     self.light_camera_rotation()
         else:
             # Tracking-Modus aktiv
+            # Prüfe zuerst ob Rotation läuft (auch im Tracking-Modus möglich)
+            if self.search_state == "rotating":
+                # Führe einen Schritt der Rotation aus
+                if self.rotation_step >= self.rotation_total_steps:
+                    # Rotation abgeschlossen
+                    if self.rmb_held:
+                        self._hold_rmb(False)
+                    self.rotation_step = 0
+                    self.search_state = "idle"
+                    self.no_yolo_detection_count = 0  # Reset nach Drehung
+                    print("[TARGET-SUCHE] Drehung abgeschlossen (Tracking-Modus)")
+                else:
+                    # Führe einen Schritt aus
+                    self._execute_rotation_step()
+                return  # Rotation hat Priorität
+            
             if no_target:
                 # Target verloren, zurück zur Suche
                 print("[TARGET-SUCHE] Target verloren! Wechsle zurück zu Target-Suche.")
                 self.target_search_mode = True
                 self.rotation_count = 0
                 self.no_yolo_detection_count = 0  # Reset Zähler
+                self.search_state = "idle"  # Reset State-Machine
+                self.rotation_step = 0  # Reset Rotation
                 # Stoppe W-Taste falls gedrückt
                 if self.w_key_held:
                     self._hold_w_key(False)
@@ -506,10 +589,9 @@ class HumanInput:
                     if self.no_yolo_detection_count >= self.max_no_yolo_detections:
                         # 5 Mal hintereinander kein Mark gefunden → Drehung
                         print(f"[TARGET-SUCHE] {self.max_no_yolo_detections} Mal hintereinander kein Mark von YOLO gefunden - Drehe um ~30°")
-                        self.rotate_90_degrees()
+                        self._start_rotation()
+                        self.search_state = "rotating"
                         self.no_yolo_detection_count = 0  # Reset nach Drehung
-                        # Zusätzliche Pause nach Drehung (rotate_90_degrees hat bereits eine Pause, aber sicherheitshalber)
-                        time.sleep(0.5)  # Zusätzliche Pause für Mark-Erkennung
     
     def _hold_w_key(self, hold=True):
         """Verwaltet den W-Taste-Status (Vorwärtsbewegung)."""
