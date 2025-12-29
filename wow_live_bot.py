@@ -45,7 +45,7 @@ class HumanInput:
         self.deadzone = 30 
         
         # Geschwindigkeit: Wie aggressiv dreht sich der Bot? (Niedriger = langsamer)
-        self.speed_factor = 0.15  # Deutlich langsamer für präzisere Bewegungen
+        self.speed_factor = 0.10  # Reduziert für smoothere Bewegungen (von 0.15)
         
         # Vertikale Steuerung: Weniger präzise, nur um Ziel in oberer Hälfte zu halten
         self.vertical_deadzone = 100  # Große Deadzone für vertikale Bewegung
@@ -65,6 +65,21 @@ class HumanInput:
         # Range-State-Management
         self.current_range_state = None  # OUT_OF_RANGE, MELEE_RANGE, IN_RANGE, UNKNOWN
         self.previous_range_state = None  # Für State-Change-Erkennung
+        
+        # Target-Suche-State-Management
+        self.target_search_mode = True  # True = Suche Target, False = Tracking-Modus
+        self.last_tab_press_time = 0  # Zeitpunkt des letzten Tab-Drucks
+        self.tab_press_delay = 0.5  # Mindestabstand zwischen Tab-Drücken (Sekunden)
+        self.rotation_count = 0  # Anzahl der 90°-Drehungen bei Target-Suche
+        self.max_rotations = 4  # Maximale Anzahl 90°-Drehungen (360°)
+        self.rotation_direction = 1  # 1 = rechts, -1 = links
+        self.last_range_state_for_f1 = None  # Letzter Range-State für F1-Erkennung
+        self.last_f1_press_time = 0  # Zeitpunkt des letzten F1-Drucks
+        self.f1_cooldown = 1.5  # Mindestabstand nach F1, bevor weitere Aktionen (Sekunden)
+        
+        # YOLO-Detection-Zähler: Zählt wie oft hintereinander kein Mark gefunden wurde trotz Target
+        self.no_yolo_detection_count = 0  # Zähler für fehlende YOLO-Detection
+        self.max_no_yolo_detections = 5  # Nach 5 Mal ohne Detection → Drehung
         
         # Status der rechten Maustaste
         self.rmb_held = False
@@ -182,6 +197,256 @@ class HumanInput:
             self.rmb_held = False
             time.sleep(random.uniform(0.05, 0.1))
     
+    def press_tab_key(self):
+        """Drückt die Tab-Taste einmal für Target-Suche."""
+        current_time = time.time()
+        if current_time - self.last_tab_press_time < self.tab_press_delay:
+            return  # Zu schnell, überspringe
+        
+        try:
+            print("[TARGET-SUCHE] Drücke Tab-Taste...")
+            pydirectinput.press('tab')
+            self.last_tab_press_time = current_time
+            time.sleep(random.uniform(0.1, 0.2))  # Kurze Pause nach Tab
+        except Exception as e:
+            print(f"[TARGET-SUCHE] Fehler beim Drücken der Tab-Taste: {e}")
+    
+    def press_f1_key(self):
+        """Drückt die F1-Taste einmal, um das Mark auf das Target zu setzen."""
+        try:
+            current_time = time.time()
+            # Prüfe ob F1 kürzlich gedrückt wurde (verhindert mehrfaches Drücken)
+            if current_time - self.last_f1_press_time < 0.5:
+                return  # Zu schnell, überspringe
+            
+            print("[TARGET-SUCHE] *** DRÜCKE F1-TASTE (Setze Mark auf Target) ***")
+            pydirectinput.press('f1')
+            self.last_f1_press_time = current_time
+            
+            # Längere Pause nach F1, damit Mark-Erkennung Zeit hat
+            print("[TARGET-SUCHE] Warte auf Mark-Erkennung...")
+            time.sleep(random.uniform(1.0, 1.5))  # 1-1.5 Sekunden Pause
+        except Exception as e:
+            print(f"[TARGET-SUCHE] Fehler beim Drücken der F1-Taste: {e}")
+    
+    def _execute_mouse_movement(self, move_x, move_y, use_smoothing=True):
+        """Basis-Funktion für alle Mausbewegungen - vereinheitlicht die Logik.
+        
+        Args:
+            move_x: Gewünschte horizontale Bewegung in Pixeln
+            move_y: Gewünschte vertikale Bewegung in Pixeln
+            use_smoothing: Wenn True, wende speed_factor und max_step an
+        """
+        if use_smoothing:
+            # Begrenzung mit speed_factor für smoothere Bewegung
+            move_x = int(move_x * self.speed_factor)
+            max_step = 15  # Reduziert für smoothere Bewegung
+            move_x = max(min(move_x, max_step), -max_step)
+            
+            # Wenn wir sehr nah sind, erzwinge kleine Schritte
+            if abs(move_x) < 1 and move_x != 0:
+                move_x = 1 if move_x > 0 else -1
+            
+            # Jitter für menschliche Wirkung
+            jitter = random.randint(-2, 2)
+            move_x += jitter
+        
+        # Führe Bewegung aus
+        pydirectinput.moveRel(move_x, move_y, relative=True)
+        
+        # Längere Pause für smoothere Bewegung
+        time.sleep(random.uniform(0.020, 0.030))  # Erhöht von 0.015-0.025
+    
+    def rotate_90_degrees(self, scan_region=None):
+        """Dreht den Charakter um ca. 45 Grad (menschlich wirkend) mit dem bestehenden Bewegungsmodul.
+        
+        Args:
+            scan_region: Optional, Scan-Region für Koordinatenberechnung
+        """
+        try:
+            # Immer in eine Richtung drehen (nicht wechseln)
+            # Standard: rechts (positive Richtung)
+            rotation_direction = 1  # Immer rechts
+            
+            print(f"[TARGET-SUCHE] Drehe um ~30° (rechts)...")
+            
+            # Berechne virtuelle Target-Position außerhalb des Bildschirms für Drehung
+            # Weitere 30% Reduzierung: Etwa 10-15% der Bildschirmbreite seitlich (für ~30°)
+            rotation_distance = int(self.center_x * random.uniform(0.10, 0.15))  # 30% weniger als vorher (~30°)
+            
+            # Virtuelle Target-X-Position (immer rechts)
+            virtual_target_x = self.center_x + rotation_distance
+            
+            # Y-Position bleibt in der Mitte (horizontale Drehung)
+            virtual_target_y = self.center_y + random.randint(-50, 50)  # Leichte Variation
+            
+            # Führe Drehung in mehreren kleinen Schritten aus (menschlich wirkend)
+            steps = random.randint(8, 12)  # Anzahl der Schritte für sanfte Bewegung
+            
+            for step in range(steps):
+                # Berechne Fortschritt (0.0 bis 1.0)
+                progress = step / steps
+                
+                # Interpoliere zwischen aktueller Position und Zielposition
+                # Nutze eine Easing-Funktion für natürlichere Bewegung
+                eased_progress = progress * progress  # Quadratische Easing (langsam starten, schneller werden)
+                
+                current_target_x = self.center_x + (virtual_target_x - self.center_x) * eased_progress
+                current_target_y = self.center_y + (virtual_target_y - self.center_y) * eased_progress
+                
+                # Nutze das bestehende Bewegungsmodul für diese Position
+                # Aber ohne Deadzone-Check, damit wir uns wirklich drehen
+                offset_x = current_target_x - self.center_x
+                distance = abs(offset_x)
+                
+                # Drücke rechte Maustaste für Kameradrehung
+                if not self.rmb_held:
+                    self._hold_rmb(True)
+                
+                # Nutze die gemeinsame Basis-Funktion für Bewegung
+                move_y = random.randint(-1, 1)  # Leichte vertikale Variation
+                self._execute_mouse_movement(offset_x, move_y, use_smoothing=True)
+            
+            # Lasse rechte Maustaste los
+            if self.rmb_held:
+                self._hold_rmb(False)
+            
+            self.rotation_count += 1
+            
+            # Immer in die gleiche Richtung drehen (kein Wechsel)
+            # rotation_direction bleibt unverändert
+            
+            # Längere Pause nach Drehung, damit YOLO Zeit hat, das Mark zu finden
+            print("[TARGET-SUCHE] Warte auf Mark-Erkennung nach Drehung...")
+            time.sleep(random.uniform(1.0, 1.5))  # 1-1.5 Sekunden Pause für Mark-Erkennung
+            
+        except Exception as e:
+            print(f"[TARGET-SUCHE] Fehler bei 90°-Drehung: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def light_camera_rotation(self):
+        """Führt eine leichte Kameradrehung aus, um Target zu finden."""
+        try:
+            print("[TARGET-SUCHE] Leichte Kameradrehung...")
+            
+            # Halte rechte Maustaste
+            if not self.rmb_held:
+                self._hold_rmb(True)
+            
+            # Leichte Bewegung (kleiner als 90°) - nutze gemeinsame Basis-Funktion
+            move_x = random.randint(-100, 100)  # Zufällige Richtung
+            move_y = random.randint(-10, 10)
+            
+            # Nutze die gemeinsame Basis-Funktion für smoothere Bewegung
+            self._execute_mouse_movement(move_x, move_y, use_smoothing=True)
+            
+            # Lasse rechte Maustaste los
+            if self.rmb_held:
+                self._hold_rmb(False)
+            
+            time.sleep(random.uniform(0.1, 0.2))
+            
+        except Exception as e:
+            print(f"[TARGET-SUCHE] Fehler bei leichter Kameradrehung: {e}")
+    
+    def handle_target_search(self, range_state, has_detection):
+        """Verwaltet die Target-Suche-Logik.
+        
+        Args:
+            range_state: Aktueller Range-State (kann 'NO_TARGET' sein)
+            has_detection: True wenn YOLO ein Target erkannt hat
+        """
+        # Prüfe ob Status von NO_TARGET zu einem anderen Status wechselt
+        # Wenn ja, drücke F1-Taste (setzt Mark auf Target)
+        if (self.last_range_state_for_f1 == 'NO_TARGET' and 
+            range_state != 'NO_TARGET' and 
+            range_state is not None):
+            print(f"[TARGET-SUCHE] Status-Wechsel von NO_TARGET zu {range_state} - Drücke F1!")
+            self.press_f1_key()
+        
+        # Aktualisiere letzten State für F1-Erkennung
+        if range_state is not None:
+            self.last_range_state_for_f1 = range_state
+        
+        # Prüfe ob kein Target (Schwarz im Range-Bereich)
+        no_target = (range_state == 'NO_TARGET')
+        
+        if self.target_search_mode:
+            # Target-Suche-Modus aktiv
+            if no_target:
+                # Kein Target gefunden
+                current_time = time.time()
+                
+                # Prüfe ob F1 kürzlich gedrückt wurde - dann keine weitere Aktion
+                if current_time - self.last_f1_press_time < self.f1_cooldown:
+                    # F1 wurde kürzlich gedrückt - warte auf Mark-Erkennung
+                    return  # Keine weitere Aktion, warte auf Mark-Erkennung
+                
+                # Drücke Tab-Taste (mit Verzögerung)
+                if current_time - self.last_tab_press_time >= self.tab_press_delay:
+                    self.press_tab_key()
+                    time.sleep(0.3)  # Warte kurz auf Ergebnis
+                    
+                    # Prüfe erneut (wird im nächsten Frame gemacht, aber wir können hier schon prüfen)
+                    # Wenn nach Tab immer noch kein Target, drehe um ~45°
+                    if self.rotation_count < self.max_rotations:
+                        # Prüfe erneut, ob F1 kürzlich gedrückt wurde
+                        if time.time() - self.last_f1_press_time < self.f1_cooldown:
+                            return  # F1 wurde gedrückt, warte auf Mark-Erkennung
+                        
+                        # Warte etwas länger, dann drehe
+                        time.sleep(0.5)
+                        self.rotate_90_degrees()
+                        # Nach Drehung erneut Tab drücken
+                        time.sleep(0.3)
+                        self.press_tab_key()
+                    else:
+                        # Maximale Drehungen erreicht, reset
+                        print("[TARGET-SUCHE] Maximale Drehungen erreicht, reset...")
+                        self.rotation_count = 0
+            else:
+                # Target gefunden! (kein Schwarz mehr)
+                print("[TARGET-SUCHE] Target gefunden! Wechsle zu Tracking-Modus.")
+                self.target_search_mode = False
+                self.rotation_count = 0  # Reset für nächste Suche
+                
+                # Prüfe ob Target direkt sichtbar (YOLO hat es erkannt)
+                if not has_detection:
+                    # Target nicht direkt sichtbar, leichte Kameradrehung
+                    print("[TARGET-SUCHE] Target nicht direkt sichtbar, führe leichte Kameradrehung aus...")
+                    self.light_camera_rotation()
+        else:
+            # Tracking-Modus aktiv
+            if no_target:
+                # Target verloren, zurück zur Suche
+                print("[TARGET-SUCHE] Target verloren! Wechsle zurück zu Target-Suche.")
+                self.target_search_mode = True
+                self.rotation_count = 0
+                self.no_yolo_detection_count = 0  # Reset Zähler
+                # Stoppe W-Taste falls gedrückt
+                if self.w_key_held:
+                    self._hold_w_key(False)
+            else:
+                # Target vorhanden (nicht NO_TARGET)
+                # Prüfe ob YOLO das Mark findet
+                if has_detection:
+                    # YOLO hat Mark gefunden - Reset Zähler
+                    if self.no_yolo_detection_count > 0:
+                        print(f"[TARGET-SUCHE] YOLO hat Mark wieder gefunden (nach {self.no_yolo_detection_count} Frames ohne Detection)")
+                    self.no_yolo_detection_count = 0
+                else:
+                    # Target vorhanden, aber YOLO findet kein Mark
+                    self.no_yolo_detection_count += 1
+                    
+                    if self.no_yolo_detection_count >= self.max_no_yolo_detections:
+                        # 5 Mal hintereinander kein Mark gefunden → Drehung
+                        print(f"[TARGET-SUCHE] {self.max_no_yolo_detections} Mal hintereinander kein Mark von YOLO gefunden - Drehe um ~30°")
+                        self.rotate_90_degrees()
+                        self.no_yolo_detection_count = 0  # Reset nach Drehung
+                        # Zusätzliche Pause nach Drehung (rotate_90_degrees hat bereits eine Pause, aber sicherheitshalber)
+                        time.sleep(0.5)  # Zusätzliche Pause für Mark-Erkennung
+    
     def _hold_w_key(self, hold=True):
         """Verwaltet den W-Taste-Status (Vorwärtsbewegung)."""
         print(f"[_hold_w_key] Aufgerufen mit hold={hold}, aktueller Status w_key_held={self.w_key_held}")
@@ -214,7 +479,7 @@ class HumanInput:
             pixel_color: BGR-Farbe als (B, G, R) Tupel oder numpy array
             
         Returns:
-            'OUT_OF_RANGE', 'MELEE_RANGE', 'IN_RANGE', oder 'UNKNOWN'
+            'OUT_OF_RANGE', 'MELEE_RANGE', 'IN_RANGE', 'NO_TARGET', oder 'UNKNOWN'
         """
         if pixel_color is None or len(pixel_color) < 3:
             return 'UNKNOWN'
@@ -237,27 +502,12 @@ class HumanInput:
         if b > 150 and r < 100 and g < 100:
             return 'IN_RANGE'
         
+        # Schwarz: Alle Werte niedrig (kein Target)
+        if r < 50 and g < 50 and b < 50:
+            return 'NO_TARGET'  # Schwarz = kein Target
+        
         # Schwarz oder andere Farben
         return 'UNKNOWN'
-    
-    def get_weakuara_pixel_position(self, frame_width, frame_height):
-        """Berechnet die Pixel-Position der WeakAura relativ zur Frame-Mitte.
-        
-        Args:
-            frame_width: Breite des Frames
-            frame_height: Höhe des Frames
-            
-        Returns:
-            (x, y) Tupel mit Koordinaten relativ zum Frame
-        """
-        # Frame-Mitte
-        frame_center_x = frame_width // 2
-        frame_center_y = frame_height // 2
-        
-        # WeakAura-Position relativ zur Frame-Mitte
-        x = frame_center_x + self.weakuara_offset_x
-        y = frame_center_y + self.weakuara_offset_y
-        return (int(x), int(y))
     
     def read_range_from_frame(self, frame):
         """Liest die Range-Information aus dem Frame an der WeakAura-Position.
@@ -274,8 +524,11 @@ class HumanInput:
         try:
             h, w = frame.shape[:2]
             
-            # Berechne WeakAura-Position relativ zum Frame
-            x, y = self.get_weakuara_pixel_position(w, h)
+            # Berechne WeakAura-Position relativ zur Frame-Mitte
+            frame_center_x = w // 2
+            frame_center_y = h // 2
+            x = int(frame_center_x + self.weakuara_offset_x)
+            y = int(frame_center_y + self.weakuara_offset_y)
             
             # Prüfe ob Position innerhalb des Frames liegt
             if x < 0 or x >= w or y < 0 or y >= h:
@@ -335,10 +588,11 @@ class HumanInput:
             if self.w_key_held:
                 print(f"[RANGE] {new_range_state} - Stoppe Vorwärtsbewegung (W-Taste loslassen)")
                 self._hold_w_key(False)
-        elif new_range_state == 'UNKNOWN':
-            # Unbekannter Zustand - behalte aktuellen Status bei (keine Änderung)
+        elif new_range_state in ('UNKNOWN', 'NO_TARGET'):
+            # Unbekannter Zustand oder kein Target - behalte aktuellen Status bei (keine Änderung)
+            # NO_TARGET wird in handle_target_search behandelt, hier nur Status beibehalten
             if state_changed:
-                print(f"[RANGE] UNKNOWN - Behalte aktuellen Status (W-Taste: {self.w_key_held})")
+                print(f"[RANGE] {new_range_state} - Behalte aktuellen Status (W-Taste: {self.w_key_held})")
     
     def check_target_in_center(self, target_x, target_y):
         """Prüft, ob das Ziel horizontal nahe genug an der Bildschirmmitte ist.
@@ -415,7 +669,7 @@ class HumanInput:
         move_x = int(offset_x * self.speed_factor)
         
         # Begrenzung (Clamping), damit sich der Char nicht im Kreis dreht wie verrückt
-        max_step = 20  # Maximale Pixel pro "Tick" - deutlich reduziert
+        max_step = 15  # Maximale Pixel pro "Tick" - reduziert für smoothere Bewegung (von 20)
         move_x = max(min(move_x, max_step), -max_step)
 
         # Wenn wir sehr nah sind, erzwinge kleine Schritte, sonst bleiben wir stecken
@@ -486,6 +740,9 @@ class HumanInput:
         time.sleep(random.uniform(0.01, 0.02))
         pydirectinput.moveRel(move_x, move_y, relative=True)
         
+        # Zusätzliche Pause nach Bewegung für smoothere Bewegung
+        time.sleep(random.uniform(0.015, 0.025))
+        
         # Aktualisiere die Zeit der letzten Bot-Bewegung für Interventionserkennung
         self.last_bot_move_time = time.time()
         
@@ -498,12 +755,12 @@ class HumanInput:
             except:
                 pass
 
-        # 7. "Micro-Sleeps" - Das 'Chillen'
+        # 7. "Micro-Sleeps" - Das 'Chillen' (erhöht für smoothere Bewegung)
         # Je näher wir am Ziel sind, desto vorsichtiger werden wir.
         if distance < 100:
-            time.sleep(random.uniform(0.015, 0.030)) # Feinjustierung - länger
+            time.sleep(random.uniform(0.020, 0.035)) # Feinjustierung - länger (von 0.015-0.030)
         else:
-            time.sleep(random.uniform(0.010, 0.020)) # Schnellere Drehung - aber immer noch kontrolliert
+            time.sleep(random.uniform(0.020, 0.030)) # Schnellere Drehung - aber immer noch kontrolliert (von 0.010-0.020)
 
 class WoWBot:
     def __init__(self):
@@ -637,7 +894,11 @@ class WoWBot:
         
         try:
             h, w = frame.shape[:2]
-            x, y = self.human_input.get_weakuara_pixel_position(w, h)
+            # Berechne WeakAura-Position relativ zur Frame-Mitte
+            frame_center_x = w // 2
+            frame_center_y = h // 2
+            x = int(frame_center_x + self.human_input.weakuara_offset_x)
+            y = int(frame_center_y + self.human_input.weakuara_offset_y)
             
             # Prüfe ob Position innerhalb des Frames liegt
             if x < 0 or x >= w or y < 0 or y >= h:
@@ -821,7 +1082,11 @@ class WoWBot:
             pixel_color = None
             try:
                 h, w = frame.shape[:2]
-                x, y = self.human_input.get_weakuara_pixel_position(w, h)
+                # Berechne WeakAura-Position relativ zur Frame-Mitte
+                frame_center_x = w // 2
+                frame_center_y = h // 2
+                x = int(frame_center_x + self.human_input.weakuara_offset_x)
+                y = int(frame_center_y + self.human_input.weakuara_offset_y)
                 if 0 <= x < w and 0 <= y < h:
                     pixel_color = frame[y, x]
             except:
@@ -830,51 +1095,68 @@ class WoWBot:
             # Zeichne WeakAura-Position im Detection Frame
             detection_frame = self.draw_weakuara_position(detection_frame, range_state, pixel_color)
             
-            target_x = None  # Reset target
-            target_y = None  # Reset target
+            # Prüfe ob YOLO ein Target erkannt hat
+            has_detection = len(results[0].boxes) > 0
             
-            if len(results[0].boxes) > 0:
-                # Nimm das Box mit der höchsten Confidence oder das, das der Mitte am nächsten ist
-                # Hier nehmen wir einfach das erste (meistens das sicherste)
-                box = results[0].boxes[0].xywh[0].cpu().numpy()
+            # --- TARGET-SUCHE-LOGIK ---
+            # Prüfe ob Target vorhanden (basierend auf Range-Farbe)
+            self.human_input.handle_target_search(range_state, has_detection)
+            
+            # Nur im Tracking-Modus die normale Logik ausführen
+            if not self.human_input.target_search_mode:
+                # Tracking-Modus: Normale Logik
+                target_x = None  # Reset target
+                target_y = None  # Reset target
                 
-                # Box[0] ist center_x relativ zum aufgenommenen Frame
-                # Box[1] ist center_y relativ zum aufgenommenen Frame
-                # Wir müssen den Offset der Region beachten!
-                # Da scan_region = adjust_region_for_scanning(region) ist, 
-                # müssen wir die absolute Bildschirmposition berechnen.
+                if has_detection:
+                    # Nimm das Box mit der höchsten Confidence oder das, das der Mitte am nächsten ist
+                    # Hier nehmen wir einfach das erste (meistens das sicherste)
+                    box = results[0].boxes[0].xywh[0].cpu().numpy()
+                    
+                    # Box[0] ist center_x relativ zum aufgenommenen Frame
+                    # Box[1] ist center_y relativ zum aufgenommenen Frame
+                    # Wir müssen den Offset der Region beachten!
+                    # Da scan_region = adjust_region_for_scanning(region) ist, 
+                    # müssen wir die absolute Bildschirmposition berechnen.
+                    
+                    local_center_x = float(box[0])
+                    local_center_y = float(box[1])
+                    
+                    # Absolutes X auf dem Monitor = Region Links + Lokales X
+                    absolute_target_x = scan_region[0] + local_center_x
+                    # Absolutes Y auf dem Monitor = Region Top + Lokales Y
+                    absolute_target_y = scan_region[1] + local_center_y
+                    
+                    target_x = absolute_target_x
+                    target_y = absolute_target_y
+                    
+                    # Visualisierung
+                    conf = float(results[0].boxes[0].conf[0].cpu().numpy())
+                    print(f"[DETECTION] Ziel gefunden bei ({local_center_x:.1f}, {local_center_y:.1f}), Conf: {conf:.2f}")
+                else:
+                    # Kein Ziel gefunden - W-Taste loslassen
+                    target_x = None
+                    target_y = None
+                    self.human_input._hold_w_key(False)
                 
-                local_center_x = float(box[0])
-                local_center_y = float(box[1])
+                # --- HIER KOMMT DIE BEWEGUNG REIN ---
+                # Wir übergeben die absolute X- und Y-Koordinate des Ziels. 
+                # Die Klasse weiß selbst, wo die Bildschirmmitte ist.
+                # X ist präzise, Y ist weniger präzise (nur obere Hälfte).
+                # Übergebe auch die gesamte Scan-Region für obere Grenze-Erkennung
+                self.human_input.move_mouse_human(target_x, target_y, scan_region)
                 
-                # Absolutes X auf dem Monitor = Region Links + Lokales X
-                absolute_target_x = scan_region[0] + local_center_x
-                # Absolutes Y auf dem Monitor = Region Top + Lokales Y
-                absolute_target_y = scan_region[1] + local_center_y
-                
-                target_x = absolute_target_x
-                target_y = absolute_target_y
-                
-                # Visualisierung
-                conf = float(results[0].boxes[0].conf[0].cpu().numpy())
-                print(f"[DETECTION] Ziel gefunden bei ({local_center_x:.1f}, {local_center_y:.1f}), Conf: {conf:.2f}")
+                # --- RANGE-ERKENNUNG & VORWÄRTSBEWEGUNG (W-Taste) ---
+                # Range-State wurde bereits oben für Visualisierung gelesen
+                # Verarbeite Range-State-Änderung (verhindert Key-Spamming)
+                # Nur wenn nicht NO_TARGET (dann ist es bereits in handle_target_search behandelt)
+                if range_state != 'NO_TARGET':
+                    self.human_input.handle_range_state_change(range_state)
             else:
-                # Kein Ziel gefunden - W-Taste loslassen
-                target_x = None
-                target_y = None
-                self.human_input._hold_w_key(False)
-            
-            # --- HIER KOMMT DIE BEWEGUNG REIN ---
-            # Wir übergeben die absolute X- und Y-Koordinate des Ziels. 
-            # Die Klasse weiß selbst, wo die Bildschirmmitte ist.
-            # X ist präzise, Y ist weniger präzise (nur obere Hälfte).
-            # Übergebe auch die gesamte Scan-Region für obere Grenze-Erkennung
-            self.human_input.move_mouse_human(target_x, target_y, scan_region)
-            
-            # --- RANGE-ERKENNUNG & VORWÄRTSBEWEGUNG (W-Taste) ---
-            # Range-State wurde bereits oben für Visualisierung gelesen
-            # Verarbeite Range-State-Änderung (verhindert Key-Spamming)
-            self.human_input.handle_range_state_change(range_state)
+                # Target-Suche-Modus: Keine normale Tracking-Logik
+                # W-Taste sollte nicht gedrückt sein
+                if self.human_input.w_key_held:
+                    self.human_input._hold_w_key(False)
 
             # Prüfe Q-Taste zum Beenden (funktioniert auch ohne GUI)
             should_exit = False
