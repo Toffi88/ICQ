@@ -52,8 +52,25 @@ class HumanInput:
         self.vertical_speed_factor = 0.08  # Langsamer für weniger präzise Bewegung
         self.upper_half_threshold = 0.5  # Ziel sollte in oberen 50% des Bildschirms sein 
         
+        # Zentrums-Deadzone: Wie nah muss das Ziel horizontal an der Mitte sein, um nach vorne zu laufen?
+        # WICHTIG: Nur X-Achse wird geprüft! Y-Achse ist nur für Kamera-Einstellung, nicht für Bewegung.
+        # Größerer Bereich, damit der Charakter früher anfängt zu laufen (nicht nur herumstehen)
+        self.center_deadzone_x = 120  # Pixel-Toleranz horizontal (größer, damit Charakter läuft)
+        
+        # WeakAura Position (Offset von der Bildschirmmitte nach oben)
+        # TODO: Diese Werte anpassen basierend auf der tatsächlichen Position der WeakAura
+        self.weakuara_offset_x = 0  # Horizontal (0 = genau in der Mitte)
+        self.weakuara_offset_y = 590  # Vertikal (positiv = nach unten von der Mitte, 400 Pixel tiefer als -100)
+        
+        # Range-State-Management
+        self.current_range_state = None  # OUT_OF_RANGE, MELEE_RANGE, IN_RANGE, UNKNOWN
+        self.previous_range_state = None  # Für State-Change-Erkennung
+        
         # Status der rechten Maustaste
         self.rmb_held = False
+        
+        # Status der W-Taste (Vorwärtsbewegung)
+        self.w_key_held = False
         
         # Benutzer-Interventionserkennung
         self.last_mouse_pos = None
@@ -164,6 +181,193 @@ class HumanInput:
             pydirectinput.mouseUp(button='right')
             self.rmb_held = False
             time.sleep(random.uniform(0.05, 0.1))
+    
+    def _hold_w_key(self, hold=True):
+        """Verwaltet den W-Taste-Status (Vorwärtsbewegung)."""
+        print(f"[_hold_w_key] Aufgerufen mit hold={hold}, aktueller Status w_key_held={self.w_key_held}")
+        if hold and not self.w_key_held:
+            print("[_hold_w_key] *** DRÜCKE W-TASTE ***")
+            try:
+                pydirectinput.keyDown('w')
+                self.w_key_held = True
+                print(f"[_hold_w_key] W-Taste sollte jetzt gedrückt sein, w_key_held={self.w_key_held}")
+                # Längere Pause, damit das Spiel die Taste registriert
+                time.sleep(random.uniform(0.05, 0.1))
+            except Exception as e:
+                print(f"[_hold_w_key] FEHLER beim Drücken der W-Taste: {e}")
+        elif not hold and self.w_key_held:
+            print("[_hold_w_key] *** LASSE W-TASTE LOS ***")
+            try:
+                pydirectinput.keyUp('w')
+                self.w_key_held = False
+                print(f"[_hold_w_key] W-Taste sollte jetzt losgelassen sein, w_key_held={self.w_key_held}")
+                time.sleep(random.uniform(0.02, 0.05))
+            except Exception as e:
+                print(f"[_hold_w_key] FEHLER beim Loslassen der W-Taste: {e}")
+        else:
+            print(f"[_hold_w_key] Keine Änderung nötig (hold={hold}, w_key_held={self.w_key_held})")
+    
+    def get_range_state_from_color(self, pixel_color):
+        """Interpretiert die Farbe eines Pixels und gibt den Range-Zustand zurück.
+        
+        Args:
+            pixel_color: BGR-Farbe als (B, G, R) Tupel oder numpy array
+            
+        Returns:
+            'OUT_OF_RANGE', 'MELEE_RANGE', 'IN_RANGE', oder 'UNKNOWN'
+        """
+        if pixel_color is None or len(pixel_color) < 3:
+            return 'UNKNOWN'
+        
+        # BGR Format (OpenCV Standard)
+        b, g, r = int(pixel_color[0]), int(pixel_color[1]), int(pixel_color[2])
+        
+        # Toleranz-Schwellenwerte für Farberkennung (wegen Kompressionsartefakten)
+        # Lockere Schwellenwerte für bessere Erkennung
+        
+        # Rot: OUT_OF_RANGE (R dominant, G und B niedrig)
+        if r > 150 and g < 100 and b < 100:
+            return 'OUT_OF_RANGE'
+        
+        # Grün: MELEE_RANGE (G dominant, R und B niedrig)
+        if g > 150 and r < 100 and b < 100:
+            return 'MELEE_RANGE'
+        
+        # Blau: IN_RANGE (B dominant, R und G niedrig)
+        if b > 150 and r < 100 and g < 100:
+            return 'IN_RANGE'
+        
+        # Schwarz oder andere Farben
+        return 'UNKNOWN'
+    
+    def get_weakuara_pixel_position(self, frame_width, frame_height):
+        """Berechnet die Pixel-Position der WeakAura relativ zur Frame-Mitte.
+        
+        Args:
+            frame_width: Breite des Frames
+            frame_height: Höhe des Frames
+            
+        Returns:
+            (x, y) Tupel mit Koordinaten relativ zum Frame
+        """
+        # Frame-Mitte
+        frame_center_x = frame_width // 2
+        frame_center_y = frame_height // 2
+        
+        # WeakAura-Position relativ zur Frame-Mitte
+        x = frame_center_x + self.weakuara_offset_x
+        y = frame_center_y + self.weakuara_offset_y
+        return (int(x), int(y))
+    
+    def read_range_from_frame(self, frame):
+        """Liest die Range-Information aus dem Frame an der WeakAura-Position.
+        
+        Args:
+            frame: OpenCV Frame (BGR Format) - sollte der aufgenommene Frame sein (scan_region)
+            
+        Returns:
+            Range-Zustand: 'OUT_OF_RANGE', 'MELEE_RANGE', 'IN_RANGE', oder 'UNKNOWN'
+        """
+        if frame is None:
+            return 'UNKNOWN'
+        
+        try:
+            h, w = frame.shape[:2]
+            
+            # Berechne WeakAura-Position relativ zum Frame
+            x, y = self.get_weakuara_pixel_position(w, h)
+            
+            # Prüfe ob Position innerhalb des Frames liegt
+            if x < 0 or x >= w or y < 0 or y >= h:
+                if not hasattr(self, '_range_warning_shown'):
+                    print(f"[RANGE] WeakAura-Position ({x}, {y}) außerhalb des Frames ({w}x{h})")
+                    print(f"[RANGE] Frame-Mitte wäre ({w//2}, {h//2}), Offset ist ({self.weakuara_offset_x}, {self.weakuara_offset_y})")
+                    self._range_warning_shown = True
+                return 'UNKNOWN'
+            
+            # Lese Pixel-Farbe an dieser Position
+            pixel_color = frame[y, x]  # OpenCV verwendet (y, x) nicht (x, y)!
+            
+            # Interpretiere Farbe
+            range_state = self.get_range_state_from_color(pixel_color)
+            
+            # Debug-Ausgabe (häufiger für besseres Debugging)
+            if not hasattr(self, '_range_debug_counter'):
+                self._range_debug_counter = 0
+            self._range_debug_counter += 1
+            
+            if self._range_debug_counter % 5 == 0:  # Alle 5 Frames (häufiger)
+                print(f"[RANGE] Position ({x}, {y}), Farbe BGR=({pixel_color[0]}, {pixel_color[1]}, {pixel_color[2]}), State={range_state}")
+            
+            return range_state
+        except Exception as e:
+            print(f"[RANGE] Fehler beim Lesen der Range: {e}")
+            import traceback
+            traceback.print_exc()
+            return 'UNKNOWN'
+    
+    def handle_range_state_change(self, new_range_state):
+        """Verwaltet die W-Taste basierend auf Range-State.
+        
+        Args:
+            new_range_state: Neuer Range-Zustand
+        """
+        # Prüfe ob State sich geändert hat
+        state_changed = new_range_state != self.current_range_state
+        
+        if state_changed:
+            self.previous_range_state = self.current_range_state
+            self.current_range_state = new_range_state
+            print(f"[RANGE] State-Änderung: {self.previous_range_state} -> {self.current_range_state}")
+        
+        # Entscheide basierend auf aktuellem State (auch wenn er gleich bleibt)
+        if new_range_state == 'OUT_OF_RANGE':
+            # Ziel ist zu weit weg - laufe nach vorne (W-Taste gedrückt halten)
+            if not self.w_key_held:
+                if state_changed:
+                    print("[RANGE] OUT_OF_RANGE - Starte Vorwärtsbewegung (W-Taste)")
+                else:
+                    print("[RANGE] OUT_OF_RANGE - Halte Vorwärtsbewegung (W-Taste)")
+                self._hold_w_key(True)
+            # Wenn W-Taste bereits gedrückt ist, nichts tun (bleibt gedrückt)
+        elif new_range_state in ('MELEE_RANGE', 'IN_RANGE'):
+            # Ziel ist in Reichweite - stoppe Bewegung
+            if self.w_key_held:
+                print(f"[RANGE] {new_range_state} - Stoppe Vorwärtsbewegung (W-Taste loslassen)")
+                self._hold_w_key(False)
+        elif new_range_state == 'UNKNOWN':
+            # Unbekannter Zustand - behalte aktuellen Status bei (keine Änderung)
+            if state_changed:
+                print(f"[RANGE] UNKNOWN - Behalte aktuellen Status (W-Taste: {self.w_key_held})")
+    
+    def check_target_in_center(self, target_x, target_y):
+        """Prüft, ob das Ziel horizontal nahe genug an der Bildschirmmitte ist.
+        
+        WICHTIG: Nur X-Achse wird geprüft! Y-Achse ist nur für Kamera-Einstellung.
+        
+        Returns:
+            True wenn Ziel horizontal innerhalb der Zentrums-Deadzone ist, False sonst
+        """
+        if target_x is None:
+            print(f"[DEBUG CENTER] Kein Ziel (target_x={target_x})")
+            return False
+        
+        # Berechne horizontalen Abstand zur Mitte (NUR X-Achse!)
+        offset_x = abs(target_x - self.center_x)
+        
+        # Prüfe ob innerhalb der horizontalen Deadzone
+        in_center = offset_x <= self.center_deadzone_x
+        
+        # Debug-Ausgabe (immer, damit wir sehen was passiert)
+        if not hasattr(self, '_debug_counter'):
+            self._debug_counter = 0
+        self._debug_counter += 1
+        
+        # Jeden Frame ausgeben (kann später reduziert werden)
+        print(f"[DEBUG CENTER] Frame {self._debug_counter}: Ziel X={target_x:.1f}, Mitte X={self.center_x}")
+        print(f"[DEBUG CENTER] Horizontaler Offset: {offset_x:.1f}/{self.center_deadzone_x}, In Center: {in_center}")
+        
+        return in_center
 
     def move_mouse_human(self, target_x, target_y=None, scan_region=None):
         """Bewegt die Maus horizontal und vertikal Richtung Ziel mit menschlicher Beschleunigung.
@@ -420,6 +624,78 @@ class WoWBot:
         
         return display_frame
 
+    def draw_weakuara_position(self, frame, range_state=None, pixel_color=None):
+        """Zeichnet die WeakAura-Position im Frame mit einem Kreis und Informationen.
+        
+        Args:
+            frame: OpenCV Frame (BGR Format)
+            range_state: Optional, der erkannte Range-State
+            pixel_color: Optional, die erkannte Pixel-Farbe (BGR)
+        """
+        if frame is None:
+            return frame
+        
+        try:
+            h, w = frame.shape[:2]
+            x, y = self.human_input.get_weakuara_pixel_position(w, h)
+            
+            # Prüfe ob Position innerhalb des Frames liegt
+            if x < 0 or x >= w or y < 0 or y >= h:
+                return frame  # Position außerhalb, nichts zeichnen
+            
+            # Farbe basierend auf Range-State
+            if range_state == 'OUT_OF_RANGE':
+                circle_color = (0, 0, 255)  # Rot (BGR)
+                state_text = "OUT_OF_RANGE"
+            elif range_state == 'MELEE_RANGE':
+                circle_color = (0, 255, 0)  # Grün (BGR)
+                state_text = "MELEE_RANGE"
+            elif range_state == 'IN_RANGE':
+                circle_color = (255, 0, 0)  # Blau (BGR)
+                state_text = "IN_RANGE"
+            else:
+                circle_color = (128, 128, 128)  # Grau (BGR)
+                state_text = "UNKNOWN"
+            
+            # Zeichne einen großen Kreis um die Position
+            cv2.circle(frame, (x, y), 15, circle_color, 3)  # Äußerer Kreis
+            cv2.circle(frame, (x, y), 5, circle_color, -1)  # Innerer gefüllter Kreis
+            
+            # Zeichne ein kleines Kreuz in der Mitte für präzise Position
+            cv2.line(frame, (x - 10, y), (x + 10, y), circle_color, 2)
+            cv2.line(frame, (x, y - 10), (x, y + 10), circle_color, 2)
+            
+            # Text mit Range-State und Position
+            info_text = f"Range: {state_text}"
+            if pixel_color is not None:
+                b, g, r = int(pixel_color[0]), int(pixel_color[1]), int(pixel_color[2])
+                info_text += f" | BGR:({b},{g},{r})"
+            info_text += f" | Pos:({x},{y})"
+            
+            # Hintergrund für Text
+            text_size, _ = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            text_x = x - text_size[0] // 2
+            text_y = y - 30  # Über dem Kreis
+            
+            # Stelle sicher, dass Text nicht außerhalb des Frames ist
+            if text_y < 20:
+                text_y = y + 30  # Unter dem Kreis
+            
+            # Schwarzer Hintergrund für bessere Lesbarkeit
+            cv2.rectangle(frame, 
+                        (text_x - 5, text_y - text_size[1] - 5), 
+                        (text_x + text_size[0] + 5, text_y + 5), 
+                        (0, 0, 0), -1)
+            
+            # Text zeichnen
+            cv2.putText(frame, info_text, (text_x, text_y), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+        except Exception as e:
+            print(f"[RANGE] Fehler beim Zeichnen der WeakAura-Position: {e}")
+        
+        return frame
+
     def adjust_region_for_scanning(self, region):
         """Passt die Region an, um obere 5% und untere 15% auszuschließen."""
         if region is None:
@@ -540,6 +816,20 @@ class WoWBot:
             # Visualisierung für Detection View
             detection_frame = self.draw_detections(frame, results, offset=(0, 0))
             
+            # Lese Range-Status für Visualisierung (vorher, damit wir die Farbe haben)
+            range_state = self.human_input.read_range_from_frame(frame)
+            pixel_color = None
+            try:
+                h, w = frame.shape[:2]
+                x, y = self.human_input.get_weakuara_pixel_position(w, h)
+                if 0 <= x < w and 0 <= y < h:
+                    pixel_color = frame[y, x]
+            except:
+                pass
+            
+            # Zeichne WeakAura-Position im Detection Frame
+            detection_frame = self.draw_weakuara_position(detection_frame, range_state, pixel_color)
+            
             target_x = None  # Reset target
             target_y = None  # Reset target
             
@@ -569,8 +859,10 @@ class WoWBot:
                 conf = float(results[0].boxes[0].conf[0].cpu().numpy())
                 print(f"[DETECTION] Ziel gefunden bei ({local_center_x:.1f}, {local_center_y:.1f}), Conf: {conf:.2f}")
             else:
-                # Optional: TAB drücken wenn nichts gefunden
-                pass
+                # Kein Ziel gefunden - W-Taste loslassen
+                target_x = None
+                target_y = None
+                self.human_input._hold_w_key(False)
             
             # --- HIER KOMMT DIE BEWEGUNG REIN ---
             # Wir übergeben die absolute X- und Y-Koordinate des Ziels. 
@@ -578,6 +870,11 @@ class WoWBot:
             # X ist präzise, Y ist weniger präzise (nur obere Hälfte).
             # Übergebe auch die gesamte Scan-Region für obere Grenze-Erkennung
             self.human_input.move_mouse_human(target_x, target_y, scan_region)
+            
+            # --- RANGE-ERKENNUNG & VORWÄRTSBEWEGUNG (W-Taste) ---
+            # Range-State wurde bereits oben für Visualisierung gelesen
+            # Verarbeite Range-State-Änderung (verhindert Key-Spamming)
+            self.human_input.handle_range_state_change(range_state)
 
             # Prüfe Q-Taste zum Beenden (funktioniert auch ohne GUI)
             should_exit = False
@@ -589,7 +886,7 @@ class WoWBot:
                         should_exit = True
                 except:
                     pass
-            
+                    
             # Visuelle Kontrolle - Detection View mit Bounding Boxes und Wahrscheinlichkeiten
             if self.show_gui:
                 try:
@@ -628,6 +925,12 @@ class WoWBot:
                 print("\n[STATUS] Q-Taste gedrückt - Bot wird beendet...")
                 break
 
+        # Stelle sicher, dass alle Tasten losgelassen werden
+        if self.human_input.rmb_held:
+            self.human_input._hold_rmb(False)
+        if self.human_input.w_key_held:
+            self.human_input._hold_w_key(False)
+        
         if self.show_gui:
             try:
                 cv2.destroyAllWindows()
