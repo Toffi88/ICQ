@@ -1,3 +1,52 @@
+"""
+================================================================================
+WoW Bot - Automatisierter Target-Tracking und Bewegungs-Bot
+================================================================================
+
+HAUPTFUNKTIONEN:
+---------------
+1. Target-Erkennung:
+   - YOLO-basierte Objekterkennung (White Skull Modell)
+   - WeakAura-basierte Range-Erkennung (Farbcodierung: Rot/Grün/Blau/Schwarz)
+   - Automatische Target-Suche mit Tab-Taste und Kameradrehung
+
+2. Kamera-Steuerung:
+   - Präzise horizontale Mausbewegung zum Target (X-Achse)
+   - Weniger präzise vertikale Steuerung (Y-Achse) - hält Target in oberer Hälfte
+   - Verhindert, dass Target oben aus dem Bildschirm rutscht
+
+3. Bewegungssteuerung:
+   - W-Taste: Läuft nach vorne wenn Target OUT_OF_RANGE (Rot)
+   - Stoppt wenn Target in MELEE_RANGE (Grün) oder IN_RANGE (Blau)
+   - Range-Status wird aus WeakAura-Farbe gelesen
+
+4. Target-Suche-Logik:
+   - Schwarz in WeakAura = kein Target → Tab drücken
+   - Nach Tab weiterhin Schwarz → ~30° Drehung → erneut Tab
+   - Farbwechsel von Schwarz → F1 drücken (setzt Mark auf Target)
+   - Wenn YOLO 5x kein Mark findet trotz Target → Drehung
+
+5. Benutzer-Interventionserkennung:
+   - Erkennt wenn Benutzer Maus benutzt → pausiert Bot automatisch
+   - Synchronisiert Status der rechten Maustaste
+
+WICHTIGE KONZEPTE:
+-----------------
+- Deadzone: Bereich um Bildschirmmitte, in dem keine Bewegung nötig ist
+- Range-States: OUT_OF_RANGE (Rot), MELEE_RANGE (Grün), IN_RANGE (Blau), NO_TARGET (Schwarz)
+- Target-Search-Mode vs. Tracking-Mode: Zwei Betriebsmodi
+- Smoothe Bewegungen: Reduzierte Geschwindigkeit (speed_factor=0.10, max_step=15)
+
+KONFIGURATION:
+-------------
+- WeakAura-Position: weakuara_offset_x, weakuara_offset_y (relativ zur Bildschirmmitte)
+- Bewegungsgeschwindigkeit: speed_factor, max_step
+- Deadzones: deadzone (horizontal), vertical_deadzone, center_deadzone_x
+- Range-Schwellenwerte: In get_range_state_from_color() definiert
+
+================================================================================
+"""
+
 import cv2
 import dxcam
 import numpy as np
@@ -16,6 +65,9 @@ try:
 except ImportError:
     WIN32_AVAILABLE = False
     print("[WARNUNG] win32api nicht verfügbar. Benutzer-Interventionserkennung deaktiviert.")
+
+# Importiere Combat-Rotationen
+from combat import MeleeRotation, RangeRotation
 
 # --- KONFIGURATION ---
 WINDOW_TITLE = "World of Warcraft"
@@ -46,6 +98,7 @@ class HumanInput:
         
         # Geschwindigkeit: Wie aggressiv dreht sich der Bot? (Niedriger = langsamer)
         self.speed_factor = 0.10  # Reduziert für smoothere Bewegungen (von 0.15)
+        self.target_search_speed_factor = 0.15  # 50% schneller während Target-Suche (0.10 * 1.5)
         
         # Vertikale Steuerung: Weniger präzise, nur um Ziel in oberer Hälfte zu halten
         self.vertical_deadzone = 100  # Große Deadzone für vertikale Bewegung
@@ -79,6 +132,10 @@ class HumanInput:
         
         # YOLO-Detection-Zähler: Zählt wie oft hintereinander kein Mark gefunden wurde trotz Target
         self.no_yolo_detection_count = 0  # Zähler für fehlende YOLO-Detection
+        
+        # Combat-Rotationen (werden in update_center initialisiert)
+        self.melee_rotation = None
+        self.range_rotation = None
         self.max_no_yolo_detections = 5  # Nach 5 Mal ohne Detection → Drehung
         
         # Status der rechten Maustaste
@@ -101,6 +158,12 @@ class HumanInput:
     def update_center(self, w, h):
         self.center_x = w // 2
         self.center_y = h // 2
+        
+        # Initialisiere Combat-Rotationen mit center_deadzone_x (nur einmal)
+        if self.melee_rotation is None:
+            self.melee_rotation = MeleeRotation(self.center_deadzone_x)
+            self.range_rotation = RangeRotation(self.center_deadzone_x)
+            print(f"[STATUS] Combat-Rotationen initialisiert (Deadzone: {self.center_deadzone_x}px)")
     
     def _get_mouse_state(self):
         """Holt den aktuellen Status der Maus (Position und Tasten) von Windows."""
@@ -238,8 +301,9 @@ class HumanInput:
             use_smoothing: Wenn True, wende speed_factor und max_step an
         """
         if use_smoothing:
-            # Begrenzung mit speed_factor für smoothere Bewegung
-            move_x = int(move_x * self.speed_factor)
+            # Verwende erhöhte Geschwindigkeit während Target-Suche (50% schneller)
+            current_speed_factor = self.target_search_speed_factor if self.target_search_mode else self.speed_factor
+            move_x = int(move_x * current_speed_factor)
             max_step = 15  # Reduziert für smoothere Bewegung
             move_x = max(min(move_x, max_step), -max_step)
             
@@ -495,7 +559,11 @@ class HumanInput:
             return 'OUT_OF_RANGE'
         
         # Grün: MELEE_RANGE (G dominant, R und B niedrig)
+        # Erweiterte Bedingung: G muss deutlich höher sein als R und B
         if g > 150 and r < 100 and b < 100:
+            return 'MELEE_RANGE'
+        # Alternative: Wenn G deutlich höher ist als R und B (auch wenn G < 150)
+        if g > 120 and g > r + 30 and g > b + 30 and r < 120 and b < 120:
             return 'MELEE_RANGE'
         
         # Blau: IN_RANGE (B dominant, R und G niedrig)
@@ -666,7 +734,9 @@ class HumanInput:
         # Formel: (Offset * Speed) + Random Noise
         
         # Basis-Geschwindigkeit (Progressiv)
-        move_x = int(offset_x * self.speed_factor)
+        # Verwende erhöhte Geschwindigkeit während Target-Suche (50% schneller)
+        current_speed_factor = self.target_search_speed_factor if self.target_search_mode else self.speed_factor
+        move_x = int(offset_x * current_speed_factor)
         
         # Begrenzung (Clamping), damit sich der Char nicht im Kreis dreht wie verrückt
         max_step = 15  # Maximale Pixel pro "Tick" - reduziert für smoothere Bewegung (von 20)
@@ -984,8 +1054,6 @@ class WoWBot:
         print("[STATUS] Bot gestartet!")
         print("[STATUS] ========================================")
         print(f"[STATUS] Suche nach WoW-Fenster: '{WINDOW_TITLE}'")
-        print("[STATUS] Warte 3 Sekunden...")
-        time.sleep(3)
         
         frame_count = 0
         print("[STATUS] Starte Hauptschleife...")
@@ -1015,6 +1083,11 @@ class WoWBot:
                 print(f"[WARNUNG] Konnte Mausposition nicht initialisieren: {e}")
         
         print("[STATUS] Drücke 'Q' zum Beenden (oder Ctrl+C)")
+        
+        # 3-Sekunden-Pause nach dem Start, damit Bot-Fenster sich öffnen kann und alle Systeme hochfahren
+        print("[STATUS] Warte 3 Sekunden für System-Initialisierung...")
+        time.sleep(3)
+        print("[STATUS] System bereit - Bot beginnt mit Verarbeitung...")
         
         while True:
             frame_count += 1
@@ -1152,6 +1225,22 @@ class WoWBot:
                 # Nur wenn nicht NO_TARGET (dann ist es bereits in handle_target_search behandelt)
                 if range_state != 'NO_TARGET':
                     self.human_input.handle_range_state_change(range_state)
+                
+                # --- KAMPF-ROTATIONEN ---
+                # Aktualisiere Melee- und Range-Rotationen basierend auf Range-State
+                if self.human_input.melee_rotation is not None and self.human_input.range_rotation is not None:
+                    self.human_input.melee_rotation.update(
+                        target_x, 
+                        self.human_input.center_x, 
+                        range_state, 
+                        has_detection
+                    )
+                    self.human_input.range_rotation.update(
+                        target_x, 
+                        self.human_input.center_x, 
+                        range_state, 
+                        has_detection
+                    )
             else:
                 # Target-Suche-Modus: Keine normale Tracking-Logik
                 # W-Taste sollte nicht gedrückt sein
