@@ -3,3 +3,6 @@
 # Zeilen mit # werden ignoriert
 50,86
 44,80
+52,78
+54,87
+41,81

@@ -158,7 +158,10 @@ class HumanInput:
         self.f1_cooldown = 1.5  # Mindestabstand nach F1, bevor weitere Aktionen (Sekunden)
         
         # YOLO-Detection-Zähler: Zählt wie oft hintereinander kein Mark gefunden wurde trotz Target
-        self.no_yolo_detection_count = 0  # Zähler für fehlende YOLO-Detection
+        self.no_yolo_detection_count = 0  # Zähler für fehlende YOLO-Detection (für handle_target_search)
+        self.max_no_yolo_detections = 5  # Nach 5 Mal ohne Detection → Drehung (für handle_target_search)
+        self.no_yolo_detection_count_main = 0  # Zähler für fehlende YOLO-Detection in Hauptschleife
+        self.max_no_yolo_detections_main = 10  # Nach 10 Mal ohne Detection → leichte Kameradrehung (für Hauptschleife)
         
         # State-Machine für nicht-blockierende Target-Suche
         self.search_state = "idle"  # "idle", "waiting_after_tab", "check_rotation", "rotating", "waiting_after_rotation"
@@ -207,13 +210,18 @@ class HumanInput:
         self.waypoint_reached_threshold = 0.0  # Keine Toleranz - Waypoint muss exakt erreicht werden
         self.last_waypoint_tab_time = 0  # Zeitpunkt des letzten TAB-Drucks während Waypoint-Navigation
         self.waypoint_tab_interval = 2.0  # Alle 2 Sekunden TAB drücken während Waypoint-Navigation
+        self.waypoint_tab_just_pressed = False  # Flag: TAB wurde gerade während Waypoint-Navigation gedrückt
         
         # Tastatur-Rotation für große Winkel (A/D Tasten)
         self.a_key_held = False  # A-Taste (gegen Uhrzeigersinn / links)
         self.d_key_held = False  # D-Taste (mit Uhrzeigersinn / rechts)
         self.last_ad_key_press_time = 0  # Zeitpunkt des letzten A/D-Tasten-Drucks
-        self.ad_key_press_interval_far = 0.01  # Intervall wenn Target weit weg ist (fast am Rand) - schneller
-        self.ad_key_press_interval_near = 0.30  # Intervall wenn Target nah ist (1/6 der Geschwindigkeit) - langsamer
+        # WICHTIG: 70% Reduktion bereits eingerechnet (nur noch 30% Geschwindigkeit)
+        # Bewegung_reduction_factor = 3.33 (1 / 0.3)
+        # weit weg: kleines Intervall = häufiger drücken = stärkere Bewegung
+        # nah: großes Intervall = seltener drücken = viel kleinere Bewegung
+        self.ad_key_press_interval_far = 0.1  # Intervall wenn Target weit weg (kleines Intervall = häufiger drücken = stärkere Bewegung)
+        self.ad_key_press_interval_near = 0.333  # Intervall wenn Target nah (großes Intervall = seltener drücken = viel kleinere Bewegung)
         self.ad_key_press_duration = 0.02  # Dauer eines einzelnen Tastendrucks (Pulsing)
         self.ad_key_press_start_time = 0  # Zeitpunkt, zu dem die Taste gedrückt wurde
 
@@ -405,7 +413,7 @@ class HumanInput:
             print(f"[TARGET-SUCHE] Starte Drehung um ~30° (rechts)...")
             
             # Berechne virtuelle Target-Position außerhalb des Bildschirms für Drehung
-            rotation_distance = int(self.center_x * random.uniform(0.10, 0.15))
+            rotation_distance = int(self.center_x * random.uniform(0.5, 0.10))
             
             # Virtuelle Target-Positionen
             self.rotation_virtual_target_x = self.center_x + rotation_distance
@@ -1016,10 +1024,13 @@ class HumanInput:
             return False
         
         # TAB alle 2 Sekunden während Waypoint-Navigation drücken
+        # WICHTIG: Nach TAB wird die Farbe geprüft (wird in der Hauptschleife gemacht)
         current_time = time.time()
         if current_time - self.last_waypoint_tab_time >= self.waypoint_tab_interval:
             self.press_tab_key()
             self.last_waypoint_tab_time = current_time
+            # Markiere dass TAB gerade gedrückt wurde (für Farberkennung in Hauptschleife)
+            self.waypoint_tab_just_pressed = True
         
         # Berechne Distanz zum Ziel (beide Werte sind normalisiert 0.0-1.0)
         dx = target_x - self.current_x
@@ -1299,12 +1310,13 @@ class HumanInput:
         # Berechne Geschwindigkeit basierend auf Distanz
         # Maximale Distanz für Berechnung (z.B. 500px vom Rand)
         max_distance = 500.0
-        # Wenn Target weit weg ist (fast am Rand): Volle Geschwindigkeit
-        # Wenn Target nah ist: 1/6 der Geschwindigkeit
+        # Wenn Target weit weg ist (fast am Rand): Stärkere Bewegung (kleines Intervall = häufiger drücken)
+        # Wenn Target nah ist: Viel kleinere Bewegung (großes Intervall = seltener drücken)
         # Interpoliere zwischen den beiden Werten
         normalized_distance = min(distance / max_distance, 1.0)
-        # Wenn distance groß (nahe 1.0) → volle Geschwindigkeit (kleines Intervall)
-        # Wenn distance klein (nahe 0.0) → 1/6 Geschwindigkeit (großes Intervall)
+        # Wenn distance groß (nahe 1.0) → stärkere Bewegung (kleines Intervall = ad_key_press_interval_far)
+        # Wenn distance klein (nahe 0.0) → viel kleinere Bewegung (großes Intervall = ad_key_press_interval_near)
+        # WICHTIG: 70% Reduktion bereits in den Intervall-Werten eingerechnet
         # Intervall = ad_key_press_interval_far + (ad_key_press_interval_near - ad_key_press_interval_far) * (1 - normalized_distance)
         current_interval = self.ad_key_press_interval_far + (self.ad_key_press_interval_near - self.ad_key_press_interval_far) * (1.0 - normalized_distance)
         
@@ -2079,6 +2091,9 @@ class WoWBot:
             
             # 2.1 Target-Farbe = Schwarz → Kein Target vorhanden
             if range_state == 'NO_TARGET':
+                # Reset Zähler für fehlende YOLO-Detection (Target verloren)
+                self.human_input.no_yolo_detection_count_main = 0
+                
                 # TAB-Taste drücken und Target erneut prüfen
                 # (handle_target_search macht das bereits, aber wir prüfen hier auch)
                 if not has_detection:
@@ -2099,20 +2114,49 @@ class WoWBot:
                 if has_detection:
                     # Totenkopf gefunden → Charakter wird auf Totenkopf ausgerichtet
                     # (wird weiter unten in der normalen Logik behandelt)
-                    pass
+                    # Reset Zähler wenn Totenkopf gefunden
+                    if self.human_input.no_yolo_detection_count_main > 0:
+                        print(f"[TARGET-PRÜFUNG] Totenkopf gefunden (nach {self.human_input.no_yolo_detection_count_main} Frames ohne Detection)")
+                    self.human_input.no_yolo_detection_count_main = 0
                 else:
-                    # Target vorhanden, aber YOLO findet kein Totenkopf → leichte Drehung
+                    # Target vorhanden, aber YOLO findet kein Totenkopf
                     if not self.human_input.target_search_mode:
-                        self.human_input.light_camera_rotation()
+                        # Zähler erhöhen
+                        self.human_input.no_yolo_detection_count_main += 1
+                        
+                        # Erst nach 10 Mal kein Totenkopf → leichte Drehung
+                        if self.human_input.no_yolo_detection_count_main >= self.human_input.max_no_yolo_detections_main:
+                            print(f"[TARGET-PRÜFUNG] {self.human_input.max_no_yolo_detections_main} Mal hintereinander kein Totenkopf gefunden - Leichte Kameradrehung")
+                            self.human_input.light_camera_rotation()
+                            self.human_input.no_yolo_detection_count_main = 0  # Reset nach Drehung
             
             # ============================================================
             # 3. WAYPOINT-MODUL (wenn kein Target)
             # ============================================================
-            # Während des Laufens: Permanent Target-Farbe prüfen
-            # Sobald Target-Farbe nicht mehr Schwarz: Sofortiger Wechsel ins Kampf-Modul
+            # Während des Laufens: TAB alle 2 Sekunden drücken
+            # Nach TAB: Farbe prüfen - Schwarz = weiter, Farbig = Wechsel ins Kampf-Modul
             if navigating_to_waypoint and len(self.human_input.waypoints) > 0:
+                # Prüfe ob TAB gerade gedrückt wurde
+                if self.human_input.waypoint_tab_just_pressed:
+                    # TAB wurde gerade gedrückt - prüfe jetzt die Farbe
+                    self.human_input.waypoint_tab_just_pressed = False
+                    
+                    if range_state != 'NO_TARGET':
+                        # Farbe ist nicht schwarz (Rot/Blau/Grün) - Wechsel ins Kampf-Modul
+                        print(f"[WAYPOINT] TAB gedrückt - Target-Farbe erkannt: {range_state} - Wechsle ins Kampf-Modul!")
+                        navigating_to_waypoint = False
+                        # Stoppe Waypoint-Bewegung
+                        if self.human_input.w_key_held:
+                            self.human_input._hold_w_key(False)
+                        # F1 drücken für Mark (falls noch nicht geschehen)
+                        if (self.human_input.last_range_state_for_f1 == 'NO_TARGET' and 
+                            range_state in ['OUT_OF_RANGE', 'IN_RANGE', 'MELEE_RANGE']):
+                            print(f"[WAYPOINT] Drücke F1 für Mark auf Target!")
+                            self.human_input.press_f1_key()
+                    # else: TAB wurde noch nicht gedrückt, weiter Waypoint-Navigation
+                
                 # Prüfe ob wir noch einen aktiven Waypoint haben
-                if self.human_input.current_waypoint_index < len(self.human_input.waypoints):
+                if navigating_to_waypoint and self.human_input.current_waypoint_index < len(self.human_input.waypoints):
                     target_waypoint = self.human_input.waypoints[self.human_input.current_waypoint_index]
                     target_x, target_y = target_waypoint
                     
@@ -2121,12 +2165,16 @@ class WoWBot:
                     
                     if waypoint_reached:
                         print(f"[NAVIGATION] Waypoint {self.human_input.current_waypoint_index + 1} erreicht!")
-                        self.human_input.current_waypoint_index += 1
                         
-                        # Wenn alle Waypoints erreicht, starte von vorne
-                        if self.human_input.current_waypoint_index >= len(self.human_input.waypoints):
-                            print("[NAVIGATION] Alle Waypoints erreicht! Starte von vorne.")
-                            self.human_input.current_waypoint_index = 0
+                        # WICHTIG: Wähle nächsten Waypoint ZUFÄLLIG (nicht sequenziell)
+                        if len(self.human_input.waypoints) > 1:
+                            # Wähle zufälligen Waypoint, aber nicht den aktuellen
+                            available_indices = [i for i in range(len(self.human_input.waypoints)) if i != self.human_input.current_waypoint_index]
+                            self.human_input.current_waypoint_index = random.choice(available_indices)
+                            print(f"[NAVIGATION] Nächster Waypoint (zufällig): {self.human_input.current_waypoint_index + 1}")
+                        else:
+                            # Nur ein Waypoint vorhanden, bleibe bei diesem
+                            pass
                 else:
                     # Keine Waypoints mehr, reset
                     self.human_input.current_waypoint_index = 0
@@ -2148,12 +2196,14 @@ class WoWBot:
             self._last_bot_mode = current_bot_mode
             
             # --- TARGET-SUCHE-LOGIK ---
-            # WICHTIG: Target-Suche wird IMMER ausgeführt, auch während Waypoint-Navigation
-            # um permanent die Target-Farbe zu prüfen
-            # Prüfe ob Target vorhanden (basierend auf Range-Farbe)
-            self.human_input.handle_target_search(range_state, has_detection)
+            # WICHTIG: handle_target_search() wird NUR aufgerufen wenn KEINE Waypoint-Navigation aktiv ist
+            # Während Waypoint-Navigation übernimmt das Waypoint-Modul die Target-Suche (TAB alle 2 Sek)
+            if not navigating_to_waypoint:
+                # Normale Target-Suche (ohne Waypoint-Navigation)
+                self.human_input.handle_target_search(range_state, has_detection)
             
             # Wenn während Waypoint-Navigation ein Target gefunden wird, sofort stoppen
+            # (wird bereits im Waypoint-Modul behandelt, aber als Sicherheit hier auch)
             if navigating_to_waypoint and (target_found or has_detection or range_state != 'NO_TARGET'):
                 print("[TARGET-PRÜFUNG] Target während Waypoint-Navigation gefunden! Wechsle ins Kampf-Modul.")
                 navigating_to_waypoint = False
