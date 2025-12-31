@@ -133,6 +133,10 @@ class HumanInput:
         # Größerer Bereich, damit der Charakter früher anfängt zu laufen (nicht nur herumstehen)
         self.center_deadzone_x = 120  # Pixel-Toleranz horizontal (größer, damit Charakter läuft)
         
+        # Pufferzone für Ausrichtung: Zusätzliche 50 Pixel in beide Richtungen
+        # Wenn Target innerhalb dieser Zone ist, gilt es als "ausgerichtet" für Kampf-Modus
+        self.alignment_buffer_zone = 50  # Pixel-Toleranz zusätzlich zur Deadzone für Ausrichtung
+        
         # WeakAura Position (Offset von der Bildschirmmitte nach oben)
         # TODO: Diese Werte anpassen basierend auf der tatsächlichen Position der WeakAura
         self.weakuara_offset_x = 0  # Horizontal (0 = genau in der Mitte)
@@ -201,10 +205,17 @@ class HumanInput:
         self.waypoints = []  # Liste von (x, y) Tupeln (normalisiert 0.0-1.0)
         self.current_waypoint_index = 0
         self.waypoint_reached_threshold = 0.0  # Keine Toleranz - Waypoint muss exakt erreicht werden
+        self.last_waypoint_tab_time = 0  # Zeitpunkt des letzten TAB-Drucks während Waypoint-Navigation
+        self.waypoint_tab_interval = 2.0  # Alle 2 Sekunden TAB drücken während Waypoint-Navigation
         
         # Tastatur-Rotation für große Winkel (A/D Tasten)
         self.a_key_held = False  # A-Taste (gegen Uhrzeigersinn / links)
         self.d_key_held = False  # D-Taste (mit Uhrzeigersinn / rechts)
+        self.last_ad_key_press_time = 0  # Zeitpunkt des letzten A/D-Tasten-Drucks
+        self.ad_key_press_interval_far = 0.01  # Intervall wenn Target weit weg ist (fast am Rand) - schneller
+        self.ad_key_press_interval_near = 0.30  # Intervall wenn Target nah ist (1/6 der Geschwindigkeit) - langsamer
+        self.ad_key_press_duration = 0.02  # Dauer eines einzelnen Tastendrucks (Pulsing)
+        self.ad_key_press_start_time = 0  # Zeitpunkt, zu dem die Taste gedrückt wurde
 
     def update_center(self, w, h):
         self.center_x = w // 2
@@ -305,15 +316,11 @@ class HumanInput:
         if hold and not self.rmb_held:
             pydirectinput.mouseDown(button='right')
             self.rmb_held = True
-            # Keine Pause während Target-Suche für kontinuierliche Bewegung
-            if not self.target_search_mode:
-                time.sleep(random.uniform(0.05, 0.1))  # Pause nur außerhalb der Suche
+            # Keine blockierende Pause - entfernt für bessere Performance
         elif not hold and self.rmb_held:
             pydirectinput.mouseUp(button='right')
             self.rmb_held = False
-            # Keine Pause während Target-Suche für kontinuierliche Bewegung
-            if not self.target_search_mode:
-                time.sleep(random.uniform(0.05, 0.1))  # Pause nur außerhalb der Suche
+            # Keine blockierende Pause - entfernt für bessere Performance
     
     def press_tab_key(self):
         """Drückt die Tab-Taste einmal für Target-Suche."""
@@ -325,14 +332,15 @@ class HumanInput:
             print("[TARGET-SUCHE] Drücke Tab-Taste...")
             pydirectinput.press('tab')
             self.last_tab_press_time = current_time
-            # Keine Pause während Target-Suche für kontinuierliche Bewegung
-            if not self.target_search_mode:
-                time.sleep(random.uniform(0.1, 0.2))  # Pause nur außerhalb der Suche
+            # Keine blockierende Pause - entfernt für bessere Performance
         except Exception as e:
             print(f"[TARGET-SUCHE] Fehler beim Drücken der Tab-Taste: {e}")
     
     def press_f1_key(self):
-        """Drückt die F1-Taste einmal, um das Mark auf das Target zu setzen."""
+        """Drückt die F1-Taste einmal, um das Mark auf das Target zu setzen.
+        
+        WICHTIG: Keine blockierende Pause - verwendet f1_cooldown für nicht-blockierende Wartezeit.
+        """
         try:
             current_time = time.time()
             # Prüfe ob F1 kürzlich gedrückt wurde (verhindert mehrfaches Drücken)
@@ -342,10 +350,7 @@ class HumanInput:
             print("[TARGET-SUCHE] *** DRÜCKE F1-TASTE (Setze Mark auf Target) ***")
             pydirectinput.press('f1')
             self.last_f1_press_time = current_time
-            
-            # Längere Pause nach F1, damit Mark-Erkennung Zeit hat
-            print("[TARGET-SUCHE] Warte auf Mark-Erkennung...")
-            time.sleep(random.uniform(1.0, 1.5))  # 1-1.5 Sekunden Pause
+            # Keine blockierende Pause - f1_cooldown wird in handle_target_search geprüft
         except Exception as e:
             print(f"[TARGET-SUCHE] Fehler beim Drücken der F1-Taste: {e}")
     
@@ -478,9 +483,7 @@ class HumanInput:
             if self.rmb_held:
                 self._hold_rmb(False)
             
-            # Keine Pause während Target-Suche für kontinuierliche Bewegung
-            if not self.target_search_mode:
-                time.sleep(random.uniform(0.1, 0.2))  # Pause nur außerhalb der Suche
+            # Keine blockierende Pause - entfernt für bessere Performance
             
         except Exception as e:
             print(f"[TARGET-SUCHE] Fehler bei leichter Kameradrehung: {e}")
@@ -492,17 +495,15 @@ class HumanInput:
             range_state: Aktueller Range-State (kann 'NO_TARGET' sein)
             has_detection: True wenn YOLO ein Target erkannt hat
         """
-        # Prüfe ob Status von NO_TARGET zu einem anderen Status wechselt
-        # Wenn ja, drücke F1-Taste (setzt Mark auf Target)
-        if (self.last_range_state_for_f1 == 'NO_TARGET' and 
-            range_state != 'NO_TARGET' and 
-            range_state is not None):
-            print(f"[TARGET-SUCHE] Status-Wechsel von NO_TARGET zu {range_state} - Drücke F1!")
-            self.press_f1_key()
+        # HINWEIS: F1-Logik wird jetzt direkt in der Hauptschleife ausgeführt,
+        # damit sie sofort beim Wechsel von NO_TARGET zu farbigem Target ausgeführt wird.
+        # Hier aktualisieren wir nur den State, falls er noch nicht aktualisiert wurde.
         
-        # Aktualisiere letzten State für F1-Erkennung
+        # Aktualisiere letzten State für F1-Erkennung (falls noch nicht in Hauptschleife aktualisiert)
         if range_state is not None:
-            self.last_range_state_for_f1 = range_state
+            # Nur aktualisieren, wenn State sich geändert hat (verhindert doppelte Updates)
+            if self.last_range_state_for_f1 != range_state:
+                self.last_range_state_for_f1 = range_state
         
         # Prüfe ob kein Target (Schwarz im Range-Bereich)
         no_target = (range_state == 'NO_TARGET')
@@ -1014,6 +1015,12 @@ class HumanInput:
                 self._hold_rmb(False)
             return False
         
+        # TAB alle 2 Sekunden während Waypoint-Navigation drücken
+        current_time = time.time()
+        if current_time - self.last_waypoint_tab_time >= self.waypoint_tab_interval:
+            self.press_tab_key()
+            self.last_waypoint_tab_time = current_time
+        
         # Berechne Distanz zum Ziel (beide Werte sind normalisiert 0.0-1.0)
         dx = target_x - self.current_x
         dy = target_y - self.current_y
@@ -1125,8 +1132,7 @@ class HumanInput:
             # Die RMB muss während der gesamten Rotation gedrückt bleiben
             if not self.rmb_held:
                 self._hold_rmb(True)
-                # Kurze Pause, damit RMB wirklich registriert wird
-                time.sleep(0.01)
+                # Keine blockierende Pause - entfernt für bessere Performance
             
             # Berechne Mausbewegung basierend auf Richtung
             if angle_diff < 0:
@@ -1146,7 +1152,7 @@ class HumanInput:
             # (könnte von anderen Modulen losgelassen worden sein)
             if not self.rmb_held:
                 self._hold_rmb(True)
-                time.sleep(0.01)
+                # Keine blockierende Pause - entfernt für bessere Performance
             
             # Führe Mausbewegung aus (NUR wenn RMB gedrückt ist)
             if self.rmb_held:
@@ -1154,7 +1160,7 @@ class HumanInput:
             else:
                 # Fallback: Drücke RMB erneut und bewege dann
                 self._hold_rmb(True)
-                time.sleep(0.01)
+                # Keine blockierende Pause - entfernt für bessere Performance
                 pydirectinput.moveRel(move_x, move_y, relative=True)
             
             # WICHTIG: Rechte Maustaste NICHT loslassen - bleibt gedrückt für kontinuierliche Rotation
@@ -1204,10 +1210,15 @@ class HumanInput:
                 self._hold_w_key(True)
             # Wenn W-Taste bereits gedrückt ist, nichts tun (bleibt gedrückt)
         elif new_range_state in ('MELEE_RANGE', 'IN_RANGE'):
-            # Ziel ist in Reichweite - stoppe Bewegung
+            # Ziel ist in Reichweite - stoppe Bewegung IMMER (auch wenn State gleich bleibt)
+            # WICHTIG: Bei Blau oder Grün wird NUR ausgerichtet, NICHT gelaufen
             if self.w_key_held:
-                print(f"[RANGE] {new_range_state} - Stoppe Vorwärtsbewegung (W-Taste loslassen)")
+                if state_changed:
+                    print(f"[RANGE] {new_range_state} - Stoppe Vorwärtsbewegung (W-Taste loslassen)")
+                else:
+                    print(f"[RANGE] {new_range_state} - Halte Stopp (nur ausrichten, nicht laufen)")
                 self._hold_w_key(False)
+            # Wenn W-Taste bereits losgelassen ist, nichts tun (bleibt losgelassen)
         elif new_range_state in ('UNKNOWN', 'NO_TARGET'):
             # Unbekannter Zustand oder kein Target - behalte aktuellen Status bei (keine Änderung)
             # NO_TARGET wird in handle_target_search behandelt, hier nur Status beibehalten
@@ -1242,7 +1253,103 @@ class HumanInput:
         print(f"[DEBUG CENTER] Horizontaler Offset: {offset_x:.1f}/{self.center_deadzone_x}, In Center: {in_center}")
         
         return in_center
-
+    
+    def align_target_with_ad_keys(self, target_x):
+        """Richtet das Target mit A/D-Tasten auf die Mitte aus.
+        
+        Args:
+            target_x: Absolute X-Koordinate des Targets (None wenn kein Target)
+        
+        WICHTIG: 
+        - A-Taste wenn Target links von der Mitte ist (dreht nach links)
+        - D-Taste wenn Target rechts von der Mitte ist (dreht nach rechts)
+        - Beide Tasten loslassen wenn Target in der Deadzone ist
+        - Geschwindigkeit variiert: Volle Geschwindigkeit wenn Target weit weg, 1/6 wenn nah
+        """
+        # Prüfe zuerst, ob der Benutzer eingreift
+        if self.check_user_intervention():
+            # Benutzer benutzt die Tastatur - stoppe Ausrichtung
+            if self.a_key_held:
+                self._hold_a_key(False)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            return
+        
+        if target_x is None:
+            # Kein Target - stoppe Ausrichtung
+            if self.a_key_held:
+                self._hold_a_key(False)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            return
+        
+        # Berechne Offset zur Mitte
+        offset_x = target_x - self.center_x
+        distance = abs(offset_x)
+        
+        # Prüfe ob Target in der Deadzone ist
+        if distance <= self.center_deadzone_x:
+            # Target ist in der Mitte - stoppe Ausrichtung
+            if self.a_key_held:
+                self._hold_a_key(False)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            return
+        
+        # Berechne Geschwindigkeit basierend auf Distanz
+        # Maximale Distanz für Berechnung (z.B. 500px vom Rand)
+        max_distance = 500.0
+        # Wenn Target weit weg ist (fast am Rand): Volle Geschwindigkeit
+        # Wenn Target nah ist: 1/6 der Geschwindigkeit
+        # Interpoliere zwischen den beiden Werten
+        normalized_distance = min(distance / max_distance, 1.0)
+        # Wenn distance groß (nahe 1.0) → volle Geschwindigkeit (kleines Intervall)
+        # Wenn distance klein (nahe 0.0) → 1/6 Geschwindigkeit (großes Intervall)
+        # Intervall = ad_key_press_interval_far + (ad_key_press_interval_near - ad_key_press_interval_far) * (1 - normalized_distance)
+        current_interval = self.ad_key_press_interval_far + (self.ad_key_press_interval_near - self.ad_key_press_interval_far) * (1.0 - normalized_distance)
+        
+        # Prüfe ob Zeit für nächsten Tastendruck
+        current_time = time.time()
+        time_since_last_press = current_time - self.last_ad_key_press_time
+        
+        if time_since_last_press < current_interval:
+            # Noch nicht Zeit für nächsten Tastendruck - lasse Tasten los
+            if self.a_key_held:
+                self._hold_a_key(False)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            return
+        
+        # Prüfe ob Taste gerade gedrückt ist und ob sie losgelassen werden sollte
+        if self.a_key_held or self.d_key_held:
+            # Taste ist gedrückt - prüfe ob Zeit zum Loslassen
+            if current_time - self.ad_key_press_start_time >= self.ad_key_press_duration:
+                # Zeit zum Loslassen
+                if self.a_key_held:
+                    self._hold_a_key(False)
+                if self.d_key_held:
+                    self._hold_d_key(False)
+                self.last_ad_key_press_time = current_time
+                return
+        
+        # Zeit für neuen Tastendruck - drücke entsprechend der Richtung
+        if offset_x < 0:
+            # Target ist links von der Mitte → A-Taste (links drehen)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            # Drücke A-Taste kurz (Pulsing)
+            if not self.a_key_held:
+                self._hold_a_key(True)
+                self.ad_key_press_start_time = current_time
+        else:
+            # Target ist rechts von der Mitte → D-Taste (rechts drehen)
+            if self.a_key_held:
+                self._hold_a_key(False)
+            # Drücke D-Taste kurz (Pulsing)
+            if not self.d_key_held:
+                self._hold_d_key(True)
+                self.ad_key_press_start_time = current_time
+    
     def move_mouse_human(self, target_x, target_y=None, scan_region=None):
         """Bewegt die Maus horizontal und vertikal Richtung Ziel mit menschlicher Beschleunigung.
         
@@ -1944,16 +2051,72 @@ class WoWBot:
             if not hasattr(self, '_last_bot_mode'):
                 self._last_bot_mode = None
             
-            # --- WAYPOINT-NAVIGATION ---
-            # Nur wenn kein YOLO-Target vorhanden ist, navigiere zu Waypoints
+            # ============================================================
+            # 1. TARGET-PRÜFUNG (HÖCHSTE PRIORITÄT)
+            # ============================================================
+            # Prüfe zuerst die Target-Farbe, bevor Waypoint-Navigation
             navigating_to_waypoint = False
-            if not has_detection and len(self.human_input.waypoints) > 0:
+            target_found = False
+            
+            # WICHTIG: Initialisiere last_range_state_for_f1 beim ersten Durchlauf
+            if self.human_input.last_range_state_for_f1 is None:
+                self.human_input.last_range_state_for_f1 = range_state
+            
+            # WICHTIG: Prüfe Wechsel von NO_TARGET zu farbigem Target
+            # F1 MUSS sofort gedrückt werden, bevor andere Aktionen
+            # Dies muss IMMER passieren, wenn der Wechsel erkannt wird
+            if (self.human_input.last_range_state_for_f1 == 'NO_TARGET' and 
+                range_state != 'NO_TARGET' and 
+                range_state is not None and
+                range_state in ['OUT_OF_RANGE', 'IN_RANGE', 'MELEE_RANGE']):
+                print(f"[TARGET-PRÜFUNG] Status-Wechsel von NO_TARGET zu {range_state} - Drücke F1 sofort!")
+                self.human_input.press_f1_key()
+            
+            # Aktualisiere State immer (auch wenn kein Wechsel stattfindet)
+            # WICHTIG: Dies muss NACH der F1-Prüfung passieren, damit der Wechsel erkannt wird
+            if range_state is not None:
+                self.human_input.last_range_state_for_f1 = range_state
+            
+            # 2.1 Target-Farbe = Schwarz → Kein Target vorhanden
+            if range_state == 'NO_TARGET':
+                # TAB-Taste drücken und Target erneut prüfen
+                # (handle_target_search macht das bereits, aber wir prüfen hier auch)
+                if not has_detection:
+                    # Wenn weiterhin kein Target: Wechsel in Waypoint-Modul
+                    if len(self.human_input.waypoints) > 0:
+                        navigating_to_waypoint = True
+                else:
+                    # YOLO hat Target gefunden trotz NO_TARGET → Target vorhanden
+                    target_found = True
+                    navigating_to_waypoint = False
+            
+            # 2.2 Target-Farbe = Rot / Blau / Grün → Target vorhanden
+            elif range_state in ['OUT_OF_RANGE', 'IN_RANGE', 'MELEE_RANGE']:
+                target_found = True
+                navigating_to_waypoint = False
+                
+                # Totenkopf-Symbol suchen (YOLO)
+                if has_detection:
+                    # Totenkopf gefunden → Charakter wird auf Totenkopf ausgerichtet
+                    # (wird weiter unten in der normalen Logik behandelt)
+                    pass
+                else:
+                    # Target vorhanden, aber YOLO findet kein Totenkopf → leichte Drehung
+                    if not self.human_input.target_search_mode:
+                        self.human_input.light_camera_rotation()
+            
+            # ============================================================
+            # 3. WAYPOINT-MODUL (wenn kein Target)
+            # ============================================================
+            # Während des Laufens: Permanent Target-Farbe prüfen
+            # Sobald Target-Farbe nicht mehr Schwarz: Sofortiger Wechsel ins Kampf-Modul
+            if navigating_to_waypoint and len(self.human_input.waypoints) > 0:
                 # Prüfe ob wir noch einen aktiven Waypoint haben
                 if self.human_input.current_waypoint_index < len(self.human_input.waypoints):
                     target_waypoint = self.human_input.waypoints[self.human_input.current_waypoint_index]
                     target_x, target_y = target_waypoint
                     
-                    # Navigiere zum Waypoint
+                    # Navigiere zum Waypoint (TAB wird alle 2 Sekunden in drive_to_waypoint gedrückt)
                     waypoint_reached = self.human_input.drive_to_waypoint(target_x, target_y)
                     
                     if waypoint_reached:
@@ -1964,8 +2127,6 @@ class WoWBot:
                         if self.human_input.current_waypoint_index >= len(self.human_input.waypoints):
                             print("[NAVIGATION] Alle Waypoints erreicht! Starte von vorne.")
                             self.human_input.current_waypoint_index = 0
-                    
-                    navigating_to_waypoint = True
                 else:
                     # Keine Waypoints mehr, reset
                     self.human_input.current_waypoint_index = 0
@@ -1976,7 +2137,7 @@ class WoWBot:
                 current_bot_mode = "WAYPOINT_NAVIGATION"
             elif self.human_input.target_search_mode:
                 current_bot_mode = "TARGET_SEARCH"
-            elif has_detection:
+            elif has_detection or target_found:
                 current_bot_mode = "COMBAT"
             else:
                 current_bot_mode = "IDLE"
@@ -1987,13 +2148,30 @@ class WoWBot:
             self._last_bot_mode = current_bot_mode
             
             # --- TARGET-SUCHE-LOGIK ---
-            # Nur ausführen wenn nicht zu Waypoint navigiert wird
-            if not navigating_to_waypoint:
-                # Prüfe ob Target vorhanden (basierend auf Range-Farbe)
-                self.human_input.handle_target_search(range_state, has_detection)
+            # WICHTIG: Target-Suche wird IMMER ausgeführt, auch während Waypoint-Navigation
+            # um permanent die Target-Farbe zu prüfen
+            # Prüfe ob Target vorhanden (basierend auf Range-Farbe)
+            self.human_input.handle_target_search(range_state, has_detection)
             
+            # Wenn während Waypoint-Navigation ein Target gefunden wird, sofort stoppen
+            if navigating_to_waypoint and (target_found or has_detection or range_state != 'NO_TARGET'):
+                print("[TARGET-PRÜFUNG] Target während Waypoint-Navigation gefunden! Wechsle ins Kampf-Modul.")
+                navigating_to_waypoint = False
+                # Stoppe Waypoint-Bewegung IMMER (egal welcher Range-State)
+                if self.human_input.w_key_held:
+                    self.human_input._hold_w_key(False)
+                # Wenn Target Blau oder Grün ist, stelle sicher dass W-Taste losgelassen ist
+                if range_state in ['IN_RANGE', 'MELEE_RANGE']:
+                    if self.human_input.w_key_held:
+                        print(f"[TARGET-PRÜFUNG] {range_state} - Stoppe Bewegung sofort!")
+                        self.human_input._hold_w_key(False)
+            
+            # ============================================================
+            # 4. KAMPF-MODUL (wenn Target vorhanden)
+            # ============================================================
             # Nur im Tracking-Modus die normale Logik ausführen
-            if not self.human_input.target_search_mode:
+            # UND nur wenn ein Target vorhanden ist (nicht während Waypoint-Navigation)
+            if not self.human_input.target_search_mode and not navigating_to_waypoint:
                 # Tracking-Modus: Normale Logik
                 target_x = None  # Reset target
                 target_y = None  # Reset target
@@ -2033,42 +2211,85 @@ class WoWBot:
                     if not navigating_to_waypoint:
                         if self.human_input.w_key_held:
                             self.human_input._hold_w_key(False)
+                        # A/D-Tasten auch loslassen, wenn kein Target vorhanden
+                        if self.human_input.a_key_held:
+                            self.human_input._hold_a_key(False)
+                        if self.human_input.d_key_held:
+                            self.human_input._hold_d_key(False)
                 
-                # --- HIER KOMMT DIE BEWEGUNG REIN ---
-                # WICHTIG: move_mouse_human NICHT aufrufen während Waypoint-Navigation!
-                # Die Waypoint-Navigation verwendet nur W-Taste, keine Mausbewegungen
-                # move_mouse_human würde die Bewegung stören (kleine Mausbewegungen führen zu Zucken)
-                if not navigating_to_waypoint:
-                    # Nur im Combat-Modus (mit YOLO-Target) Mausbewegungen verwenden
-                    # Wir übergeben die absolute X- und Y-Koordinate des Ziels. 
-                    # Die Klasse weiß selbst, wo die Bildschirmmitte ist.
-                    # X ist präzise, Y ist weniger präzise (nur obere Hälfte).
-                    # Übergebe auch die gesamte Scan-Region für obere Grenze-Erkennung
-                    self.human_input.move_mouse_human(target_x, target_y, scan_region)
+                # --- HIER KOMMT DIE AUSRICHTUNG REIN ---
+                # WICHTIG: A/D-Tasten für Ausrichtung verwenden, NICHT Mausbewegungen!
+                # Die Waypoint-Navigation verwendet nur W-Taste, keine Tastatur-Ausrichtung
+                target_in_center = False
+                if not navigating_to_waypoint and target_x is not None:
+                    # Nur im Combat-Modus (mit YOLO-Target) A/D-Tasten für Ausrichtung verwenden
+                    # A-Taste wenn Target links von der Mitte ist
+                    # D-Taste wenn Target rechts von der Mitte ist
+                    self.human_input.align_target_with_ad_keys(target_x)
+                    
+                    # Prüfe ob Target in der Mitte ist (für nachfolgende Aktionen)
+                    # Verwende Pufferzone: center_deadzone_x + alignment_buffer_zone
+                    offset_x = abs(target_x - self.human_input.center_x)
+                    alignment_threshold = self.human_input.center_deadzone_x + self.human_input.alignment_buffer_zone
+                    target_in_center = offset_x <= alignment_threshold
                 
-                # --- RANGE-ERKENNUNG & VORWÄRTSBEWEGUNG (W-Taste) ---
+                # --- 3. KAMPF-ENTSCHEIDUNG NACH TARGET-FARBE (nach Ausrichtung) ---
                 # Range-State wurde bereits oben für Visualisierung gelesen
-                # Verarbeite Range-State-Änderung (verhindert Key-Spamming)
                 # WICHTIG: Nur wenn nicht NO_TARGET UND nicht während Waypoint-Navigation
                 # Die Waypoint-Navigation verwaltet die W-Taste selbst
-                if range_state != 'NO_TARGET' and not navigating_to_waypoint:
-                    self.human_input.handle_range_state_change(range_state)
-                
-                # --- KAMPF-ROTATIONEN ---
-                # Aktualisiere Melee- und Range-Rotationen basierend auf Range-State
-                if self.human_input.melee_rotation is not None and self.human_input.range_rotation is not None:
-                    self.human_input.melee_rotation.update(
-                        target_x, 
-                        self.human_input.center_x, 
-                        range_state, 
-                        has_detection
-                    )
-                    self.human_input.range_rotation.update(
-                        target_x, 
-                        self.human_input.center_x, 
-                        range_state, 
-                        has_detection
-                    )
+                if range_state != 'NO_TARGET' and not navigating_to_waypoint and target_x is not None:
+                    # Prüfe ob Target ausgerichtet ist (in Deadzone)
+                    # Wenn nicht ausgerichtet, warte noch (nur Ausrichtung)
+                    if not target_in_center:
+                        # Target noch nicht ausgerichtet - stoppe alle Aktionen außer Ausrichtung
+                        if self.human_input.w_key_held:
+                            self.human_input._hold_w_key(False)
+                    else:
+                        # Target ist ausgerichtet - führe Aktionen basierend auf Range-State aus
+                        if range_state == 'OUT_OF_RANGE':
+                            # Rot: Zum Target hinlaufen
+                            if not self.human_input.w_key_held:
+                                print("[KAMPF] OUT_OF_RANGE - Starte Vorwärtsbewegung zum Target")
+                            self.human_input.handle_range_state_change(range_state)
+                            # Stoppe Rotationen während Laufen
+                            if self.human_input.melee_rotation is not None:
+                                self.human_input.melee_rotation.is_active = False
+                            if self.human_input.range_rotation is not None:
+                                self.human_input.range_rotation.is_active = False
+                        
+                        elif range_state == 'IN_RANGE':
+                            # Blau: Range-Rotation starten
+                            if self.human_input.w_key_held:
+                                print("[KAMPF] IN_RANGE - Stoppe Bewegung, starte Range-Rotation")
+                                self.human_input._hold_w_key(False)
+                            # Aktiviere Range-Rotation
+                            if self.human_input.range_rotation is not None:
+                                self.human_input.range_rotation.update(
+                                    target_x, 
+                                    self.human_input.center_x, 
+                                    range_state, 
+                                    has_detection
+                                )
+                            # Stoppe Meele-Rotation
+                            if self.human_input.melee_rotation is not None:
+                                self.human_input.melee_rotation.is_active = False
+                        
+                        elif range_state == 'MELEE_RANGE':
+                            # Grün: Meele-Rotation starten
+                            if self.human_input.w_key_held:
+                                print("[KAMPF] MELEE_RANGE - Stoppe Bewegung, starte Meele-Rotation")
+                                self.human_input._hold_w_key(False)
+                            # Aktiviere Meele-Rotation
+                            if self.human_input.melee_rotation is not None:
+                                self.human_input.melee_rotation.update(
+                                    target_x, 
+                                    self.human_input.center_x, 
+                                    range_state, 
+                                    has_detection
+                                )
+                            # Stoppe Range-Rotation
+                            if self.human_input.range_rotation is not None:
+                                self.human_input.range_rotation.is_active = False
             else:
                 # Target-Suche-Modus: Keine normale Tracking-Logik
                 # WICHTIG: W-Taste NICHT loslassen, wenn wir zu einem Waypoint navigieren!
