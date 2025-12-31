@@ -121,6 +121,7 @@ class HumanInput:
         # Geschwindigkeit: Wie aggressiv dreht sich der Bot? (Niedriger = langsamer)
         self.speed_factor = 0.10  # Reduziert für smoothere Bewegungen (von 0.15)
         self.target_search_speed_factor = 0.15  # 50% schneller während Target-Suche (0.10 * 1.5)
+        self.rotation_speed_factor = 0.50  # Höherer Speed-Factor für Rotation (5x schneller als normal)
         
         # Vertikale Steuerung: Weniger präzise, nur um Ziel in oberer Hälfte zu halten
         self.vertical_deadzone = 100  # Große Deadzone für vertikale Bewegung
@@ -200,6 +201,10 @@ class HumanInput:
         self.waypoints = []  # Liste von (x, y) Tupeln (normalisiert 0.0-1.0)
         self.current_waypoint_index = 0
         self.waypoint_reached_threshold = 0.0  # Keine Toleranz - Waypoint muss exakt erreicht werden
+        
+        # Tastatur-Rotation für große Winkel (A/D Tasten)
+        self.a_key_held = False  # A-Taste (gegen Uhrzeigersinn / links)
+        self.d_key_held = False  # D-Taste (mit Uhrzeigersinn / rechts)
 
     def update_center(self, w, h):
         self.center_x = w // 2
@@ -352,9 +357,14 @@ class HumanInput:
             move_y: Gewünschte vertikale Bewegung in Pixeln
             use_smoothing: Wenn True, wende speed_factor und max_step an
         """
-        # WICHTIG: Stelle sicher, dass rechte Maustaste gedrückt ist, bevor Mausbewegung
+        # WICHTIG: Rechte Maustaste am ANFANG drücken
+        # Merke, ob RMB bereits vorher gedrückt war
+        rmb_was_held_before = self.rmb_held
+        
+        # Stelle sicher, dass RMB gedrückt ist
         if not self.rmb_held:
             self._hold_rmb(True)
+            # Keine Pause - würde zu hackenden Bewegungen führen
         
         if use_smoothing:
             # Verwende erhöhte Geschwindigkeit während Target-Suche (50% schneller)
@@ -374,9 +384,15 @@ class HumanInput:
         # Führe Bewegung aus
         pydirectinput.moveRel(move_x, move_y, relative=True)
         
-        # Keine Pause während Target-Suche für kontinuierliche Bewegung
-        if not self.target_search_mode:
-            time.sleep(random.uniform(0.020, 0.030))  # Normale Pause nur außerhalb der Suche
+        # Keine Pause - würde Frame-Rate reduzieren
+        # Die Bewegung wird sofort ausgeführt, Sleep ist nicht nötig
+        
+        # WICHTIG: Rechte Maustaste am ENDE loslassen
+        # Nur loslassen, wenn wir sie in dieser Funktion gedrückt haben
+        # (nicht loslassen, wenn sie bereits vorher gedrückt war)
+        if self.rmb_held and not rmb_was_held_before:
+            self._hold_rmb(False)
+            # Keine Pause - würde Frame-Rate reduzieren
     
     def _start_rotation(self):
         """Startet eine Rotation (initialisiert State-Variablen für Frame-basierte Drehung)."""
@@ -614,30 +630,91 @@ class HumanInput:
                         self.search_state = "rotating"
                         self.no_yolo_detection_count = 0  # Reset nach Drehung
     
+    def _focus_wow_window_simple(self):
+        """Einfache Funktion zum Fokussieren des WoW-Fensters (für HumanInput-Klasse)."""
+        if not WIN32_AVAILABLE:
+            return False
+        
+        try:
+            wow_titles = ['World of Warcraft', 'WoW', 'World of Warcraft Classic']
+            for title in wow_titles:
+                hwnd = win32gui.FindWindow(None, title)
+                if hwnd:
+                    if win32gui.IsIconic(hwnd):
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    win32gui.SetForegroundWindow(hwnd)
+                    win32gui.BringWindowToTop(hwnd)
+                    win32gui.SetActiveWindow(hwnd)
+                    return True
+        except:
+            pass
+        return False
+    
+    def _hold_a_key(self, hold=True):
+        """Verwaltet den A-Tasten-Status (Drehung gegen Uhrzeigersinn / links)."""
+        # Stelle sicher, dass WoW-Fenster fokussiert ist vor Tastatureingabe
+        # Nur beim ersten Drücken fokussieren (nicht jedes Frame)
+        if hold and not self.a_key_held:
+            self._focus_wow_window_simple()
+            # Keine Pause - Fokus wird schnell genug gesetzt
+            
+            # WICHTIG: Rechte Maustaste LOSLASSEN während Tastatur-Rotation!
+            # Wenn RMB gedrückt ist, ändert sich die Funktion von A/D (dreht Kamera statt Charakter)
+            if self.rmb_held:
+                self._hold_rmb(False)
+        
+        if hold and not self.a_key_held:
+            pydirectinput.keyDown('a')
+            self.a_key_held = True
+        elif not hold and self.a_key_held:
+            pydirectinput.keyUp('a')
+            self.a_key_held = False
+    
+    def _hold_d_key(self, hold=True):
+        """Verwaltet den D-Tasten-Status (Drehung mit Uhrzeigersinn / rechts)."""
+        # Stelle sicher, dass WoW-Fenster fokussiert ist vor Tastatureingabe
+        # Nur beim ersten Drücken fokussieren (nicht jedes Frame)
+        if hold and not self.d_key_held:
+            self._focus_wow_window_simple()
+            # Keine Pause - Fokus wird schnell genug gesetzt
+            
+            # WICHTIG: Rechte Maustaste LOSLASSEN während Tastatur-Rotation!
+            # Wenn RMB gedrückt ist, ändert sich die Funktion von A/D (dreht Kamera statt Charakter)
+            if self.rmb_held:
+                self._hold_rmb(False)
+        
+        if hold and not self.d_key_held:
+            pydirectinput.keyDown('d')
+            self.d_key_held = True
+        elif not hold and self.d_key_held:
+            pydirectinput.keyUp('d')
+            self.d_key_held = False
+    
     def _hold_w_key(self, hold=True):
         """Verwaltet den W-Taste-Status (Vorwärtsbewegung)."""
-        print(f"[_hold_w_key] Aufgerufen mit hold={hold}, aktueller Status w_key_held={self.w_key_held}")
+        # Stelle sicher, dass WoW-Fenster fokussiert ist vor Tastatureingabe
+        # Nur beim ersten Drücken fokussieren (nicht jedes Frame)
         if hold and not self.w_key_held:
-            print("[_hold_w_key] *** DRÜCKE W-TASTE ***")
+            self._focus_wow_window_simple()
+            # Keine Pause - Fokus wird schnell genug gesetzt
+        
+        if hold and not self.w_key_held:
             try:
                 pydirectinput.keyDown('w')
                 self.w_key_held = True
-                print(f"[_hold_w_key] W-Taste sollte jetzt gedrückt sein, w_key_held={self.w_key_held}")
-                # Längere Pause, damit das Spiel die Taste registriert
-                time.sleep(random.uniform(0.05, 0.1))
+                print(f"[W-TASTE] W-Taste GEDRÜCKT (w_key_held={self.w_key_held})")
+                # Keine Pause - Taste wird sofort registriert, Sleep würde Frame-Rate reduzieren
             except Exception as e:
                 print(f"[_hold_w_key] FEHLER beim Drücken der W-Taste: {e}")
         elif not hold and self.w_key_held:
-            print("[_hold_w_key] *** LASSE W-TASTE LOS ***")
             try:
                 pydirectinput.keyUp('w')
                 self.w_key_held = False
-                print(f"[_hold_w_key] W-Taste sollte jetzt losgelassen sein, w_key_held={self.w_key_held}")
-                time.sleep(random.uniform(0.02, 0.05))
+                print(f"[W-TASTE] W-Taste LOSGELASSEN (w_key_held={self.w_key_held})")
+                # Keine Pause - Taste wird sofort registriert, Sleep würde Frame-Rate reduzieren
             except Exception as e:
                 print(f"[_hold_w_key] FEHLER beim Loslassen der W-Taste: {e}")
-        else:
-            print(f"[_hold_w_key] Keine Änderung nötig (hold={hold}, w_key_held={self.w_key_held})")
+        # Wenn hold=True und w_key_held=True, wird nichts gemacht (Taste bleibt gedrückt)
     
     def get_range_state_from_color(self, pixel_color):
         """Interpretiert die Farbe eines Pixels und gibt den Range-Zustand zurück.
@@ -679,6 +756,38 @@ class HumanInput:
         
         # Schwarz oder andere Farben
         return 'UNKNOWN'
+    
+    def _get_direction_name(self, angle_deg):
+        """Konvertiert einen Winkel in Grad zu einer Himmelsrichtung.
+        
+        Args:
+            angle_deg: Winkel in Grad (0-360)
+            
+        Returns:
+            Himmelsrichtung als String (Norden, Osten, Süden, Westen, etc.)
+        """
+        # Normalisiere auf 0-360
+        angle_deg = angle_deg % 360.0
+        
+        # Bestimme Himmelsrichtung
+        if angle_deg >= 337.5 or angle_deg < 22.5:
+            return "Norden"
+        elif 22.5 <= angle_deg < 67.5:
+            return "Nord-Osten"
+        elif 67.5 <= angle_deg < 112.5:
+            return "Osten"
+        elif 112.5 <= angle_deg < 157.5:
+            return "Süd-Osten"
+        elif 157.5 <= angle_deg < 202.5:
+            return "Süden"
+        elif 202.5 <= angle_deg < 247.5:
+            return "Süd-Westen"
+        elif 247.5 <= angle_deg < 292.5:
+            return "Westen"
+        elif 292.5 <= angle_deg < 337.5:
+            return "Nord-Westen"
+        else:
+            return "Unbekannt"
     
     def read_range_from_frame(self, frame):
         """Liest die Range-Information aus dem Frame an der WeakAura-Position.
@@ -798,19 +907,17 @@ class HumanInput:
         
         # WeakAura: GetPlayerFacing() gibt 0 bis 2π zurück
         # Normalisiert auf 0.0-1.0, dann * 360° für Grad
-        # WICHTIG: GetPlayerFacing() gibt Winkel in Radian zurück, wo 0 = Norden
         facing_degrees = normalized * 360.0
         
-        # KORREKTUR: Osten und Westen sind um 180° verschoben
-        # Norden (0°) und Süden (180°) passen, aber Osten (90°) und Westen (270°) sind vertauscht
-        # Lösung: Wenn der Winkel im Osten/Westen-Bereich ist, um 180° verschieben
-        # Osten-Bereich: 45°-135° -> sollte 90° sein, aber zeigt ~270° (Westen)
-        # Westen-Bereich: 225°-315° -> sollte 270° sein, aber zeigt ~90° (Osten)
+        # FEHLERHAFTE KORREKTUR ENTFERNT:
+        # Die vorherige Logik hat Winkel zwischen 45-135 und 225-315 um 180 Grad gedreht.
+        # Das hat dazu geführt, dass der Bot seine eigene Position falsch interpretiert
+        # und ständig hin und her springt (Oszillation).
         
-        # Prüfe ob wir im Osten/Westen-Bereich sind (45°-135° oder 225°-315°)
-        if (45.0 <= facing_degrees < 135.0) or (225.0 <= facing_degrees < 315.0):
-            # Verschiebe um 180°
-            facing_degrees = (facing_degrees + 180.0) % 360.0
+        # Wir vertrauen dem rohen Wert der WeakAura.
+        # Sollte der Bot später verkehrt herum laufen, muss die Logik bei 
+        # "angle_diff" oder die Tastenbelegung (A/D) angepasst werden, 
+        # aber NICHT die Sensor-Daten manipuliert werden.
         
         return facing_degrees
     
@@ -851,9 +958,24 @@ class HumanInput:
             # Für Facing: normalisieren, da es ein Winkel ist
             x_value_raw = self.decode_24bit_pixel(x_pixel, normalize=True)
             y_value_raw = self.decode_24bit_pixel(y_pixel, normalize=True)
+            
+            # Für Facing: Dekodiere zuerst den normalisierten Wert (vor Korrektur)
+            facing_normalized = self.decode_24bit_pixel(facing_pixel, normalize=True)
+            facing_raw_degrees = facing_normalized * 360.0 if facing_normalized is not None else None
             facing_value = self.decode_facing_pixel(facing_pixel)
             
             if x_value_raw is not None and y_value_raw is not None and facing_value is not None:
+                # Debug-Ausgabe: Zeige rohe WeakAura-Werte (alle 30 Frames)
+                if not hasattr(self, '_weakuara_debug_counter'):
+                    self._weakuara_debug_counter = 0
+                self._weakuara_debug_counter += 1
+                if self._weakuara_debug_counter % 30 == 0:
+                    b_facing, g_facing, r_facing = int(facing_pixel[0]), int(facing_pixel[1]), int(facing_pixel[2])
+                    print(f"[WEAKAURA-RAW] Facing-Pixel BGR=({b_facing}, {g_facing}, {r_facing}), "
+                          f"Normalisiert={facing_normalized:.6f}, "
+                          f"Roher Winkel={facing_raw_degrees:.1f}°, "
+                          f"Korrigierter Winkel={facing_value:.1f}°")
+                
                 # Dekodierte Werte direkt zuweisen (keine Vertauschung mehr)
                 # Die WeakAura für X-Koordinate gibt X aus, Y-Koordinate gibt Y aus
                 self.current_x = x_value_raw
@@ -897,118 +1019,162 @@ class HumanInput:
         dy = target_y - self.current_y
         distance = math.sqrt(dx * dx + dy * dy)
         
-        # Prüfe ob Waypoint erreicht (keine Toleranz - muss exakt erreicht werden)
-        # Da exakte Gleichheit bei Floats nicht möglich ist, verwenden wir eine sehr kleine Schwelle
-        if distance < 0.0001:  # Praktisch 0, aber mit Float-Toleranz
-            # Stoppe Bewegung
+        # Prüfe ob Waypoint erreicht
+        # Waypoint gilt als erreicht, wenn X und Y jeweils innerhalb von ±1 (WoW-Koordinaten) sind
+        # Da Koordinaten normalisiert sind (0.0-1.0), entspricht ±1 in WoW-Koordinaten ±0.01 in normalisierten Koordinaten
+        waypoint_threshold = 0.01  # ±1 in WoW-Koordinaten = ±0.01 in normalisierten Koordinaten
+        
+        if abs(dx) <= waypoint_threshold and abs(dy) <= waypoint_threshold:
+            # Waypoint erreicht! Stoppe Bewegung
             if self.w_key_held:
                 self._hold_w_key(False)
             if self.rmb_held:
                 self._hold_rmb(False)
+            if self.a_key_held:
+                self._hold_a_key(False)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            print(f"[NAVIGATION] Waypoint erreicht! Pos: ({int(self.current_x * 100)}, {int(self.current_y * 100)}), Ziel: ({int(target_x * 100)}, {int(target_y * 100)})")
             return True
         
         # Berechne Zielwinkel (Target Angle) in Radian
-        # WICHTIG: In WoW ist Y=0 oben links, nicht unten links!
-        # In WoW: Norden = 0° (Y wird kleiner, dy<0), Osten = 90° (X wird größer, dx>0), 
-        #          Süden = 180° (Y wird größer, dy>0), Westen = 270° (X wird kleiner, dx<0)
-        # atan2(dx, -dy) gibt: Norden=0° (dx=0, dy<0 → atan2(0, 1) = 0°), 
-        #                        Osten=90° (dx>0, dy=0 → atan2(1, 0) = 90°),
-        #                        Süden=180° (dx=0, dy>0 → atan2(0, -1) = 180°),
-        #                        Westen=270° (dx<0, dy=0 → atan2(-1, 0) = -90° → 270°)
-        target_angle_rad = math.atan2(dx, -dy)  # -dy weil Y=0 oben ist
+        # KORREKTUR: WoW nutzt ein CCW System (0=N, 90=W).
+        # Wir müssen dx und dy negieren, um die korrekten Komponenten für atan2 zu haben.
+        # -dx = West-Komponente (Positiv wenn wir nach Westen müssen)
+        # -dy = Nord-Komponente (Positiv wenn wir nach Norden müssen)
+        # atan2(-dx, -dy) gibt: Norden=0° (dx=0, dy<0 → atan2(0, 1) = 0°),
+        #                         Westen=90° (dx<0, dy=0 → atan2(1, 0) = 90°),
+        #                         Süden=180° (dx=0, dy>0 → atan2(0, -1) = 180°),
+        #                         Osten=270° (dx>0, dy=0 → atan2(-1, 0) = -90° → 270°)
+        target_angle_rad = math.atan2(-dx, -dy)  # -dx und -dy für korrekte WoW-Koordinaten
         target_angle_deg = math.degrees(target_angle_rad)
         
         # Normalisiere auf 0-360 Grad
         if target_angle_deg < 0:
             target_angle_deg += 360.0
         
-        # Berechne Winkel-Differenz zwischen aktuellem Facing und Zielwinkel
-        # WICHTIG: current_facing ist jetzt korrekt (mit Osten/Westen-Korrektur aus decode_facing_pixel)
-        angle_diff = target_angle_deg - self.current_facing
+        # ---------------------------------------------------------
+        # STABILISIERTE WINKEL-BERECHNUNG (ANTI-PENDEL)
+        # ---------------------------------------------------------
         
-        # Normalisiere Winkel-Differenz auf -180 bis +180 Grad
-        # (um unnötig weite Drehungen zu vermeiden)
-        # WICHTIG: Korrekte Normalisierung - wenn Differenz > 180°, dann kürzeren Weg nehmen
-        while angle_diff > 180.0:
-            angle_diff -= 360.0
-        while angle_diff < -180.0:
-            angle_diff += 360.0
+        # 1. Berechne einfache Differenz
+        angle_diff_raw = self.current_facing - target_angle_deg
         
-        # KEINE zusätzliche 180°-Korrektur mehr nötig!
-        # Die Korrektur für Osten/Westen erfolgt bereits in decode_facing_pixel
+        # 2. Standard-Normalisierung auf [-180, +180]
+        # (Negativ = Links drehen, Positiv = Rechts drehen)
+        angle_diff = (angle_diff_raw + 180.0) % 360.0 - 180.0
         
-        # Debug-Ausgabe (alle 30 Frames)
-        # Werte als ganze Zahlen anzeigen (multipliziere mit 100 für WoW-Koordinaten)
-        if not hasattr(self, '_nav_debug_counter'):
-            self._nav_debug_counter = 0
-        self._nav_debug_counter += 1
-        if self._nav_debug_counter % 30 == 0:
-            # Zusätzliche Debug-Info: Zeige auch die rohen Werte vor Normalisierung
-            raw_diff = target_angle_deg - self.current_facing
-            print(f"[NAVIGATION] Pos: ({int(self.current_x * 100)}, {int(self.current_y * 100)}), "
-                  f"Ziel: ({int(target_x * 100)}, {int(target_y * 100)}), "
-                  f"Distanz: {distance * 100:.2f}, "
-                  f"Facing: {self.current_facing:.1f}°, "
-                  f"Zielwinkel: {target_angle_deg:.1f}°, "
-                  f"Roh-Differenz: {raw_diff:.1f}°, "
-                  f"Normalisierte Differenz: {angle_diff:.1f}°")
+        # 3. ANTI-PENDEL-KORREKTUR (WICHTIG!)
+        # Wenn das Ziel im Rücken ist (> 150° Differenz), springt der "kürzeste Weg"
+        # ständig zwischen Links und Rechts hin und her.
+        # Lösung: Wir erzwingen bei großen Winkeln IMMER eine Rechtsdrehung (positiv).
+        if abs(angle_diff) > 150.0:
+            angle_diff = abs(angle_diff)  # Erzwinge positiv -> Drehung nach Rechts (D-Taste)
         
-        # Drehe Charakter in Richtung Zielwinkel
-        # Wenn die Differenz zu groß ist, drehe zuerst
-        if abs(angle_diff) > 10.0:  # 10 Grad Toleranz (verdoppelt)
-            # WICHTIG: Rechte Maustaste KONTINUIERLICH drücken während Rotation
-            # Prüfe und drücke regelmäßig neu, um Fokus-Verlust zu verhindern
+        # Debug-Ausgabe (jedes Frame)
+        print(f"[NAVIGATION] Pos: ({self.current_x * 100:.2f}, {self.current_y * 100:.2f}), "
+              f"Ziel: ({target_x * 100:.2f}, {target_y * 100:.2f}), "
+              f"Distanz: {distance * 100:.2f}, "
+              f"Facing: {self.current_facing:.1f}°, "
+              f"Zielwinkel: {target_angle_deg:.1f}°, "
+              f"Roh-Differenz: {angle_diff_raw:.1f}°, "
+              f"Normalisierte Differenz: {angle_diff:.1f}°")
+        
+        # ============================================================
+        # ROTATIONS-LOGIK
+        # ============================================================
+        # angle_diff negativ → Ziel ist links → A-Taste (links drehen)
+        # angle_diff positiv → Ziel ist rechts → D-Taste (rechts drehen)
+        # abs(angle_diff) <= 10° → Dead Zone erreicht, laufen
+        # ============================================================
+        
+        abs_angle_diff = abs(angle_diff)
+        
+        if abs_angle_diff > 45.0:  # Phase 1: Grobe Ausrichtung mit Tastatur
+            # Stoppe alle anderen Tasten
+            if self.w_key_held:
+                self._hold_w_key(False)
+            if self.rmb_held:
+                self._hold_rmb(False)
+            
+            if angle_diff < 0:
+                # Negativ → Ziel ist links → A-Taste (links drehen)
+                if self.d_key_held:
+                    self._hold_d_key(False)
+                if not self.a_key_held:
+                    self._hold_a_key(True)
+            else:
+                # Positiv → Ziel ist rechts → D-Taste (rechts drehen)
+                if self.a_key_held:
+                    self._hold_a_key(False)
+                if not self.d_key_held:
+                    self._hold_d_key(True)
+            
+            return False
+        
+        elif abs_angle_diff > 10.0:  # Phase 2: Feine Ausrichtung mit Maus (10-45°)
+            # Stoppe Tastatur-Rotation
+            if self.a_key_held:
+                self._hold_a_key(False)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            if self.w_key_held:
+                self._hold_w_key(False)
+            
+            # WICHTIG: Rechte Maustaste am Anfang drücken und GEDRÜCKT HALTEN
+            # Die RMB muss während der gesamten Rotation gedrückt bleiben
             if not self.rmb_held:
                 self._hold_rmb(True)
+                # Kurze Pause, damit RMB wirklich registriert wird
+                time.sleep(0.01)
+            
+            # Berechne Mausbewegung basierend auf Richtung
+            if angle_diff < 0:
+                # Negativ → Ziel ist links → Maus nach links (negativ) für Linksdrehung
+                move_x = -int(abs_angle_diff * 0.75)
             else:
-                # Auch wenn bereits gedrückt, drücke regelmäßig neu um Fokus zu behalten
-                # Dies verhindert, dass die Maus den Fokus vom Spiel verliert
-                if not hasattr(self, '_last_rmb_refresh'):
-                    self._last_rmb_refresh = 0
-                current_time = time.time()
-                # Alle 0.5 Sekunden die rechte Maustaste neu drücken
-                if current_time - self._last_rmb_refresh > 0.5:
-                    # Kurz loslassen und wieder drücken, um Fokus zu behalten
-                    pydirectinput.mouseUp(button='right')
-                    time.sleep(0.01)
-                    pydirectinput.mouseDown(button='right')
-                    self._last_rmb_refresh = current_time
+                # Positiv → Ziel ist rechts → Maus nach rechts (positiv) für Rechtsdrehung
+                move_x = int(abs_angle_diff * 0.75)
             
-            # Konvertiere Winkel-Differenz in horizontale Mausbewegung
-            # Mittelweg: Faktor zwischen 1.5 und 3.0 für ausgewogene Geschwindigkeit
-            move_x = int(angle_diff * 2.2)  # Mittelweg zwischen 1.5 und 3.0
-            
-            # Begrenze Bewegung (Mittelweg für ausgewogene Rotation)
-            max_step = 18  # Mittelweg zwischen 12 und 30
-            move_x = max(min(move_x, max_step), -max_step)
-            
-            # Debug-Ausgabe für Rotation (reduziert)
-            if not hasattr(self, '_rotation_debug_counter'):
-                self._rotation_debug_counter = 0
-            self._rotation_debug_counter += 1
-            if self._rotation_debug_counter % 30 == 0:  # Alle 30 Frames (reduziert)
-                print(f"[ROTATION] Winkel-Differenz: {angle_diff:.1f}°, Mausbewegung: {move_x}px, RMB: {self.rmb_held}")
+            # Begrenze auf kleine, sanfte Bewegungen
+            move_x = max(min(move_x, 12), -12)
             
             # Kleine vertikale Variation für Realismus
             move_y = random.randint(-1, 1)
             
-            # WICHTIG: Verwende Smoothing für menschliche, smoothe Bewegung
-            # Aber mit angepassten Parametern für Rotation
-            self._execute_mouse_movement(move_x, move_y, use_smoothing=True)
+            # WICHTIG: Stelle sicher, dass RMB noch gedrückt ist vor der Bewegung
+            # (könnte von anderen Modulen losgelassen worden sein)
+            if not self.rmb_held:
+                self._hold_rmb(True)
+                time.sleep(0.01)
             
-            # W-Taste noch nicht drücken, erst wenn wir in die richtige Richtung schauen
-            if self.w_key_held:
-                self._hold_w_key(False)
+            # Führe Mausbewegung aus (NUR wenn RMB gedrückt ist)
+            if self.rmb_held:
+                pydirectinput.moveRel(move_x, move_y, relative=True)
+            else:
+                # Fallback: Drücke RMB erneut und bewege dann
+                self._hold_rmb(True)
+                time.sleep(0.01)
+                pydirectinput.moveRel(move_x, move_y, relative=True)
+            
+            # WICHTIG: Rechte Maustaste NICHT loslassen - bleibt gedrückt für kontinuierliche Rotation
+            # (wird erst losgelassen wenn abs_angle_diff <= 10° in der else-Klausel)
             
             return False
+        
         else:
-            # Wir schauen bereits in die richtige Richtung - laufe nach vorne
-            # TODO: Bewegung funktioniert nicht - W-Taste wird gedrückt, aber Charakter bewegt sich nicht
-            # Mögliche Ursachen:
-            # - W-Taste wird nicht korrekt an WoW weitergegeben
-            # - Charakter ist blockiert oder kann sich nicht bewegen
-            # - Bewegung muss kontinuierlich sein, nicht nur einmalig
+            # Dead Zone erreicht (abs(angle_diff) <= 10°) - laufe nach vorne
+            # Stoppe alle Rotationen
+            if self.a_key_held:
+                self._hold_a_key(False)
+            if self.d_key_held:
+                self._hold_d_key(False)
+            if self.rmb_held:
+                self._hold_rmb(False)
+            
+            # W-Taste einmal drücken und dann gedrückt lassen
             if not self.w_key_held:
+                print(f"[DRIVE_TO_WAYPOINT] W-Taste wird GEDRÜCKT (angle_diff={angle_diff:.1f}°)")
                 self._hold_w_key(True)
             
             return False  # Noch nicht am Ziel
@@ -1088,6 +1254,18 @@ class HumanInput:
         # WICHTIG: Prüfe zuerst, ob der Benutzer eingreift
         if self.check_user_intervention():
             # Benutzer benutzt die Maus - pausiere den Bot
+            return
+        
+        # WICHTIG: Wenn wir zu einem Waypoint navigieren, NICHT die Maus bewegen!
+        # Die Waypoint-Navigation verwendet ihre eigene Maus-Steuerung
+        # Diese Funktion ist nur für Combat/Target-Tracking gedacht
+        # Prüfe ob wir gerade zu einem Waypoint navigieren (indirekt über w_key_held während Navigation)
+        # Aber besser: Diese Funktion sollte nur aufgerufen werden, wenn nicht navigating_to_waypoint
+        # Das wird bereits in der Main-Loop geprüft, aber als zusätzliche Sicherheit:
+        # Wenn RMB für Waypoint-Navigation gedrückt ist, nicht stören
+        if self.rmb_held and not self.target_search_mode:
+            # RMB ist gedrückt, aber wir sind nicht im Target-Search-Modus
+            # Das könnte Waypoint-Navigation sein - nicht stören
             return
         
         if target_x is None:
@@ -1192,12 +1370,10 @@ class HumanInput:
 
         # 6. Ausführung
         # Die Taste sollte bereits in Schritt 2 gedrückt sein
-        # Kurze Pause, damit das Spiel die Bewegung registriert
-        time.sleep(random.uniform(0.01, 0.02))
+        # Keine Pause - würde zu hackenden Bewegungen führen
         pydirectinput.moveRel(move_x, move_y, relative=True)
         
-        # Zusätzliche Pause nach Bewegung für smoothere Bewegung
-        time.sleep(random.uniform(0.015, 0.025))
+        # Keine Pause - würde zu hackenden Bewegungen führen
         
         # Aktualisiere die Zeit der letzten Bot-Bewegung für Interventionserkennung
         self.last_bot_move_time = time.time()
@@ -1211,12 +1387,7 @@ class HumanInput:
             except:
                 pass
 
-        # 7. "Micro-Sleeps" - Das 'Chillen' (erhöht für smoothere Bewegung)
-        # Je näher wir am Ziel sind, desto vorsichtiger werden wir.
-        if distance < 100:
-            time.sleep(random.uniform(0.020, 0.035)) # Feinjustierung - länger (von 0.015-0.030)
-        else:
-            time.sleep(random.uniform(0.020, 0.030)) # Schnellere Drehung - aber immer noch kontrolliert (von 0.010-0.020)
+        # Keine Micro-Sleeps - würden zu hackenden Bewegungen führen
 
 class WoWBot:
     def __init__(self):
@@ -1262,6 +1433,9 @@ class WoWBot:
     def _bring_window_to_front(self, window_name):
         """Bringt ein OpenCV-Fenster in den Vordergrund.
         
+        WICHTIG: Diese Funktion sollte nur selten aufgerufen werden, da sie den Fokus
+        vom WoW-Fenster abzieht und Tastatureingaben verhindert!
+        
         Args:
             window_name: Name des OpenCV-Fensters
         """
@@ -1275,13 +1449,44 @@ class WoWBot:
                 # Stelle sicher, dass das Fenster nicht minimiert ist
                 if win32gui.IsIconic(hwnd):
                     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                
-                # Bringt das Fenster in den Vordergrund
-                win32gui.SetForegroundWindow(hwnd)
-                win32gui.BringWindowToTop(hwnd)
+                    # Nur wenn minimiert: Fenster wiederherstellen, aber NICHT in den Vordergrund bringen
+                    # (um WoW-Fokus zu behalten)
+                    # ENTFERNT: SetForegroundWindow und BringWindowToTop ziehen Fokus vom WoW-Fenster ab
+                    # win32gui.SetForegroundWindow(hwnd)
+                    # win32gui.BringWindowToTop(hwnd)
         except Exception as e:
             # Fehler beim Bringen des Fensters in den Vordergrund - nicht kritisch
             pass
+    
+    def _focus_wow_window(self):
+        """Fokussiert das WoW-Fenster, damit Tastatureingaben ankommen."""
+        if not WIN32_AVAILABLE:
+            return False
+        
+        try:
+            # Suche nach WoW-Fenster mit verschiedenen möglichen Titeln
+            wow_titles = ['World of Warcraft', 'WoW', 'World of Warcraft Classic']
+            
+            for title in wow_titles:
+                hwnd = win32gui.FindWindow(None, title)
+                if hwnd:
+                    # Stelle sicher, dass das Fenster nicht minimiert ist
+                    if win32gui.IsIconic(hwnd):
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    
+                    # Bringt das Fenster in den Vordergrund
+                    win32gui.SetForegroundWindow(hwnd)
+                    win32gui.BringWindowToTop(hwnd)
+                    
+                    # Zusätzlich: Setze den Fokus explizit
+                    win32gui.SetActiveWindow(hwnd)
+                    
+                    return True
+            
+            return False
+        except Exception as e:
+            # Fehler beim Fokussieren - nicht kritisch, aber loggen
+            return False
 
     def validate_region(self, region):
         """Validiert und korrigiert die Region, damit sie innerhalb des Bildschirms liegt."""
@@ -1632,9 +1837,18 @@ class WoWBot:
         time.sleep(3)
         print("[STATUS] System bereit - Bot beginnt mit Verarbeitung...")
         
+        # Zähler für regelmäßiges Fokussieren des WoW-Fensters
+        focus_check_counter = 0
+        
         while True:
             frame_count += 1
             fps_frame_count += 1
+            focus_check_counter += 1
+            
+            # Fokussiere WoW-Fenster regelmäßig (alle 60 Frames = ca. alle 6 Sekunden bei 10 FPS)
+            if focus_check_counter >= 60:
+                self._focus_wow_window()
+                focus_check_counter = 0
             
             # FPS berechnen (alle Sekunde aktualisieren)
             if fps_frame_count >= 30:  # Alle 30 Frames aktualisieren
@@ -1810,23 +2024,34 @@ class WoWBot:
                     conf = float(results[0].boxes[0].conf[0].cpu().numpy())
                     print(f"[DETECTION] Ziel gefunden bei ({local_center_x:.1f}, {local_center_y:.1f}), Conf: {conf:.2f}")
                 else:
-                    # Kein Ziel gefunden - W-Taste loslassen
+                    # Kein Ziel gefunden
+                    # WICHTIG: W-Taste NICHT loslassen, wenn wir zu einem Waypoint navigieren!
+                    # Die Waypoint-Navigation verwaltet die W-Taste selbst
                     target_x = None
                     target_y = None
-                    self.human_input._hold_w_key(False)
+                    # W-Taste wird nur losgelassen, wenn wir NICHT zu einem Waypoint navigieren
+                    if not navigating_to_waypoint:
+                        if self.human_input.w_key_held:
+                            self.human_input._hold_w_key(False)
                 
                 # --- HIER KOMMT DIE BEWEGUNG REIN ---
-                # Wir übergeben die absolute X- und Y-Koordinate des Ziels. 
-                # Die Klasse weiß selbst, wo die Bildschirmmitte ist.
-                # X ist präzise, Y ist weniger präzise (nur obere Hälfte).
-                # Übergebe auch die gesamte Scan-Region für obere Grenze-Erkennung
-                self.human_input.move_mouse_human(target_x, target_y, scan_region)
+                # WICHTIG: move_mouse_human NICHT aufrufen während Waypoint-Navigation!
+                # Die Waypoint-Navigation verwendet nur W-Taste, keine Mausbewegungen
+                # move_mouse_human würde die Bewegung stören (kleine Mausbewegungen führen zu Zucken)
+                if not navigating_to_waypoint:
+                    # Nur im Combat-Modus (mit YOLO-Target) Mausbewegungen verwenden
+                    # Wir übergeben die absolute X- und Y-Koordinate des Ziels. 
+                    # Die Klasse weiß selbst, wo die Bildschirmmitte ist.
+                    # X ist präzise, Y ist weniger präzise (nur obere Hälfte).
+                    # Übergebe auch die gesamte Scan-Region für obere Grenze-Erkennung
+                    self.human_input.move_mouse_human(target_x, target_y, scan_region)
                 
                 # --- RANGE-ERKENNUNG & VORWÄRTSBEWEGUNG (W-Taste) ---
                 # Range-State wurde bereits oben für Visualisierung gelesen
                 # Verarbeite Range-State-Änderung (verhindert Key-Spamming)
-                # Nur wenn nicht NO_TARGET (dann ist es bereits in handle_target_search behandelt)
-                if range_state != 'NO_TARGET':
+                # WICHTIG: Nur wenn nicht NO_TARGET UND nicht während Waypoint-Navigation
+                # Die Waypoint-Navigation verwaltet die W-Taste selbst
+                if range_state != 'NO_TARGET' and not navigating_to_waypoint:
                     self.human_input.handle_range_state_change(range_state)
                 
                 # --- KAMPF-ROTATIONEN ---
@@ -1846,9 +2071,11 @@ class WoWBot:
                     )
             else:
                 # Target-Suche-Modus: Keine normale Tracking-Logik
-                # W-Taste sollte nicht gedrückt sein
-                if self.human_input.w_key_held:
-                    self.human_input._hold_w_key(False)
+                # WICHTIG: W-Taste NICHT loslassen, wenn wir zu einem Waypoint navigieren!
+                # Die Waypoint-Navigation verwaltet die W-Taste selbst
+                if not navigating_to_waypoint:
+                    if self.human_input.w_key_held:
+                        self.human_input._hold_w_key(False)
 
             # Prüfe Q-Taste zum Beenden (funktioniert auch ohne GUI)
             should_exit = False
@@ -1887,14 +2114,18 @@ class WoWBot:
                     resized = cv2.resize(detection_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                     cv2.imshow("Detection View", resized)
                     
-                    # Bringt das Fenster in den Vordergrund
-                    # Beim ersten Frame: kleine Verzögerung, damit Fenster Zeit hat zu erstellen
+                    # WICHTIG: Bringt das Bot-Fenster NICHT in den Vordergrund, da dies den Fokus
+                    # vom WoW-Fenster abzieht und Tastatureingaben verhindert!
+                    # Nur beim ersten Frame: kleine Verzögerung, damit Fenster Zeit hat zu erstellen
                     if frame_count == 1:
                         time.sleep(0.1)  # Kurze Verzögerung für Fenster-Erstellung
+                        # Beim ersten Frame einmalig das Fenster in den Vordergrund bringen
+                        # (danach nicht mehr, um WoW-Fokus zu behalten)
                         self._bring_window_to_front("Detection View")
-                    # Alle 60 Frames: Prüfe ob Fenster minimiert wurde und bringe es zurück
-                    elif frame_count % 60 == 0:
-                        self._bring_window_to_front("Detection View")
+                    # ENTFERNT: Regelmäßiges Bringen des Bot-Fensters in den Vordergrund
+                    # Dies verhindert, dass das WoW-Fenster den Fokus verliert
+                    # elif frame_count % 60 == 0:
+                    #     self._bring_window_to_front("Detection View")
                     
                     if cv2.waitKey(1) & 0xFF == ord('q'): 
                         should_exit = True
