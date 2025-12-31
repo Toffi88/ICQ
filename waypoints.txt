@@ -1,0 +1,4 @@
+# Waypoint-Datei für WoW Bot
+# Format: x,y (eine Zeile pro Waypoint)
+# Zeilen mit # werden ignoriert
+50,86

@@ -1,69 +1,68 @@
 """
 ================================================================================
-WoW Bot - Automatisierter Target-Tracking und Bewegungs-Bot
+KONTEXT FÜR KI-ASSISTENTEN
 ================================================================================
 
-HAUPTFUNKTIONEN:
----------------
-1. Target-Erkennung:
-   - YOLO-basierte Objekterkennung (White Skull Modell)
-   - WeakAura-basierte Range-Erkennung (Farbcodierung: Rot/Grün/Blau/Schwarz)
-   - Automatische Target-Suche mit Tab-Taste und Kameradrehung
+Zweck dieses Kontext-Blocks:
+----------------------------
+Dieser Block dient dazu, neuen Chat-Fenstern wichtige Informationen über den Bot
+zu übermitteln, damit die KI den Code besser verstehen und weiterentwickeln kann.
+Es ist KEINE Versionssammlung, sondern eine Zusammenfassung der Kernfunktionalität.
 
-2. Kamera-Steuerung:
-   - Präzise horizontale Mausbewegung zum Target (X-Achse)
-   - Weniger präzise vertikale Steuerung (Y-Achse) - hält Target in oberer Hälfte
-   - Verhindert, dass Target oben aus dem Bildschirm rutscht
+================================================================================
+BEKANNTE PROBLEME / STATUS
+================================================================================
 
-3. Bewegungssteuerung:
-   - W-Taste: Läuft nach vorne wenn Target OUT_OF_RANGE (Rot)
-   - Stoppt wenn Target in MELEE_RANGE (Grün) oder IN_RANGE (Blau)
-   - Range-Status wird aus WeakAura-Farbe gelesen
+WAYPOINT-NAVIGATION:
+-------------------
+- ✅ Charakter-Ausrichtung funktioniert: Der Bot dreht sich korrekt in Richtung
+  des nächsten Waypoints
+- ❌ Bewegung zum Ziel funktioniert NICHT: Nach der korrekten Ausrichtung
+  bewegt sich der Charakter nicht zum Waypoint, obwohl die W-Taste gedrückt wird
+- Problem: Die W-Taste wird zwar gedrückt, aber der Charakter läuft nicht
+  in die richtige Richtung oder bewegt sich nicht ausreichend
 
-4. Target-Suche-Logik (State-Machine, nicht-blockierend):
-   - Schwarz in WeakAura = kein Target → Tab drücken
-   - Nach Tab weiterhin Schwarz → ~30° Drehung → erneut Tab
-   - Farbwechsel von Schwarz → F1 drücken (setzt Mark auf Target)
-   - Wenn YOLO 5x kein Mark findet trotz Target → Drehung
-   - Nahtlose Rotation über mehrere Frames (15-20 Schritte)
-   - Minimale Wartezeiten für schnelle, flüssige Bewegung
+================================================================================
+KERN-FUNKTIONALITÄT
+================================================================================
 
-5. Kampf-Rotationen (combat.py):
-   - MeleeRotation: Taste 2 für MELEE_RANGE (Grün)
-   - RangeRotation: Taste 3 für IN_RANGE (Blau)
-   - Automatischer Wechsel zwischen Rotationen basierend auf Range-State
-   - Rotation nur wenn Target in Deadzone (wie W-Taste)
-   - Zufällige Timing-Variationen (0.9-1.1 Sekunden) für menschliche Wirkung
+1. TARGET-ERKENNUNG:
+   - YOLO-Modell: White Skull Detection (runs/detect/Google_Skull1/weights/best.pt)
+   - WeakAura: Liest Range-Status aus Pixel-Farbe (Rot/Grün/Blau/Schwarz)
+   - Range-States: OUT_OF_RANGE (Rot), MELEE_RANGE (Grün), IN_RANGE (Blau), NO_TARGET (Schwarz)
 
-6. Benutzer-Interventionserkennung:
-   - Erkennt wenn Benutzer Maus benutzt → pausiert Bot automatisch
-   - Synchronisiert Status der rechten Maustaste
+2. BEWEGUNGS-LOGIK:
+   - W-Taste: Läuft wenn OUT_OF_RANGE, stoppt bei MELEE_RANGE/IN_RANGE
+   - Kamera: Präzise horizontal (X), weniger präzise vertikal (Y)
+   - Deadzone: center_deadzone_x=120px (Target muss in diesem Bereich sein)
 
-WICHTIGE KONZEPTE:
------------------
-- Deadzone: Bereich um Bildschirmmitte, in dem keine Bewegung nötig ist
-- Range-States: OUT_OF_RANGE (Rot), MELEE_RANGE (Grün), IN_RANGE (Blau), NO_TARGET (Schwarz)
-- Target-Search-Mode vs. Tracking-Mode: Zwei Betriebsmodi
-- Smoothe Bewegungen: Reduzierte Geschwindigkeit (speed_factor=0.10, max_step=15)
-- State-Machine: Nicht-blockierende Target-Suche über mehrere Frames
-- Frame-basierte Rotation: Nahtlose Drehung ohne Sleep-Blockierungen
-- Zufällige Variationen: Alle Bewegungen und Zeitangaben enthalten Zufall für menschliche Wirkung
+3. TARGET-SUCHE (State-Machine, nicht-blockierend):
+   - NO_TARGET → Tab drücken → wenn weiterhin NO_TARGET → ~30° Drehung → Tab
+   - Farbwechsel Schwarz→Farbe → F1 drücken (setzt Mark)
+   - YOLO findet 5x kein Mark → Drehung
+   - WICHTIG: Keine blockierenden Sleeps! State-Machine über mehrere Frames
 
-KONFIGURATION:
--------------
-- WeakAura-Position: weakuara_offset_x, weakuara_offset_y (relativ zur Bildschirmmitte)
-- Bewegungsgeschwindigkeit: speed_factor=0.10, target_search_speed_factor=0.15 (50% schneller)
-- Deadzones: deadzone (horizontal), vertical_deadzone, center_deadzone_x=120
-- Range-Schwellenwerte: In get_range_state_from_color() definiert
-- Tab-Delay: 0.1 Sekunden (reduziert für schnellere Suche)
-- Rotation-Schritte: 15-20 für nahtlose Bewegung
+4. KAMPF-ROTATIONEN (combat.py):
+   - MeleeRotation: Taste 2 bei MELEE_RANGE (nur wenn Target in Deadzone)
+   - RangeRotation: Taste 3 bei IN_RANGE (nur wenn Target in Deadzone)
+   - Automatischer Wechsel zwischen Rotationen
+   - Timing: 0.9-1.1 Sekunden (zufällig für menschliche Wirkung)
 
-PERFORMANCE-OPTIMIERUNGEN:
---------------------------
-- Keine blockierenden Sleeps während Target-Suche (0 FPS-Einbruch)
-- State-Machine verteilt Wartezeiten über mehrere Frames
-- Minimale Wartezeiten (0.05s) für nahtlose Bewegung
-- Lineare Interpolation für flüssigere Rotation
+5. WICHTIGE PRINZIPIEN:
+   - Alle Bewegungen/Zeiten enthalten Zufall für menschliche Wirkung
+   - Keine blockierenden Sleeps während Target-Suche (FPS-Erhalt)
+   - State-Machine für nicht-blockierende Operationen
+   - Benutzer-Intervention: Bot pausiert wenn Maus bewegt wird
+
+================================================================================
+WICHTIGE KONFIGURATIONEN
+================================================================================
+
+- WeakAura-Position: weakuara_offset_x=0, weakuara_offset_y=590 (relativ zur Mitte)
+- Speed: speed_factor=0.10 (normal), target_search_speed_factor=0.15 (50% schneller)
+- Deadzones: deadzone=30px, center_deadzone_x=120px, vertical_deadzone=100px
+- Tab-Delay: 0.1 Sekunden
+- Rotation: 15-20 Schritte für nahtlose Bewegung
 
 ================================================================================
 """
@@ -79,9 +78,11 @@ from ultralytics import YOLO
 import random
 import math
 
-# Windows API für Mausstatus-Prüfung
+# Windows API für Mausstatus-Prüfung und Fenster-Management
 try:
     import win32api
+    import win32gui
+    import win32con
     WIN32_AVAILABLE = True
 except ImportError:
     WIN32_AVAILABLE = False
@@ -183,6 +184,22 @@ class HumanInput:
         # DirectInput Konfiguration für schnellere Reaktion
         pydirectinput.PAUSE = 0.001 
         pydirectinput.FAILSAFE = False
+        
+        # Pixel-Koordinaten für Positionsdaten (relativ zum WoW-Fenster)
+        # WICHTIG: Diese müssen mit den Positionen in find_pixel_position.py übereinstimmen!
+        self.pixel_x_coord = (60, 350)  # (x, y) für X-Koordinate (Lila)
+        self.pixel_y_coord = (60, 460)  # (x, y) für Y-Koordinate (Rot)
+        self.pixel_facing_coord = (60, 590)  # (x, y) für Blickrichtung (Beige)
+        
+        # Aktuelle Position und Blickrichtung
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.current_facing = 0.0  # In Grad (0-360)
+        
+        # Waypoint-Liste
+        self.waypoints = []  # Liste von (x, y) Tupeln (normalisiert 0.0-1.0)
+        self.current_waypoint_index = 0
+        self.waypoint_reached_threshold = 0.0  # Keine Toleranz - Waypoint muss exakt erreicht werden
 
     def update_center(self, w, h):
         self.center_x = w // 2
@@ -335,6 +352,10 @@ class HumanInput:
             move_y: Gewünschte vertikale Bewegung in Pixeln
             use_smoothing: Wenn True, wende speed_factor und max_step an
         """
+        # WICHTIG: Stelle sicher, dass rechte Maustaste gedrückt ist, bevor Mausbewegung
+        if not self.rmb_held:
+            self._hold_rmb(True)
+        
         if use_smoothing:
             # Verwende erhöhte Geschwindigkeit während Target-Suche (50% schneller)
             current_speed_factor = self.target_search_speed_factor if self.target_search_mode else self.speed_factor
@@ -346,8 +367,8 @@ class HumanInput:
             if abs(move_x) < 1 and move_x != 0:
                 move_x = 1 if move_x > 0 else -1
             
-            # Jitter für menschliche Wirkung
-            jitter = random.randint(-2, 2)
+            # Jitter für menschliche Wirkung (reduziert für smoothere Bewegung)
+            jitter = random.randint(-1, 1)  # Reduziert von -2,2 auf -1,1
             move_x += jitter
         
         # Führe Bewegung aus
@@ -694,20 +715,303 @@ class HumanInput:
             # Interpretiere Farbe
             range_state = self.get_range_state_from_color(pixel_color)
             
-            # Debug-Ausgabe (häufiger für besseres Debugging)
-            if not hasattr(self, '_range_debug_counter'):
-                self._range_debug_counter = 0
-            self._range_debug_counter += 1
-            
-            if self._range_debug_counter % 5 == 0:  # Alle 5 Frames (häufiger)
-                print(f"[RANGE] Position ({x}, {y}), Farbe BGR=({pixel_color[0]}, {pixel_color[1]}, {pixel_color[2]}), State={range_state}")
-            
+            # Keine Debug-Ausgabe mehr - nur bei State-Änderung in handle_range_state_change
             return range_state
         except Exception as e:
             print(f"[RANGE] Fehler beim Lesen der Range: {e}")
             import traceback
             traceback.print_exc()
             return 'UNKNOWN'
+    
+    def decode_24bit_pixel(self, pixel_bgr, normalize=True):
+        """Dekodiert einen 24-Bit-Pixel-Wert aus BGR-Farbwerten.
+        
+        Args:
+            pixel_bgr: BGR-Farbe als (B, G, R) Tupel oder numpy array
+            normalize: Wenn True, normalisiert auf 0.0-1.0, sonst gibt Ro-Wert zurück
+            
+        Returns:
+            Normalisierter Wert zwischen 0.0 und 1.0, oder Ro-Wert (0-16777215)
+        
+        WICHTIG: WeakAura-Code zeigt:
+        - r = math.floor(raw / 65536) / 255  (obere 16 Bits, aber als 0-1 normalisiert)
+        - g = math.floor(bit.band(raw, 0xFF00) / 256) / 255  (Bits 8-15)
+        - b = bit.band(raw, 0xFF) / 255  (Bits 0-7)
+        
+        Das bedeutet: R enthält die oberen 16 Bits, nicht 8 Bits!
+        """
+        if pixel_bgr is None or len(pixel_bgr) < 3:
+            return None
+        
+        # BGR Format (OpenCV Standard)
+        b, g, r = int(pixel_bgr[0]), int(pixel_bgr[1]), int(pixel_bgr[2])
+        
+        # WeakAura-Code analysieren:
+        # raw = math.floor((facing / (math.pi * 2)) * 16777215)  [24-Bit-Wert]
+        # r = math.floor(raw / 65536) / 255
+        #   -> r * 255 = math.floor(raw / 65536) = (raw >> 16) & 0xFF  [Bits 16-23]
+        # g = math.floor(bit.band(raw, 0xFF00) / 256) / 255
+        #   -> g * 255 = (raw & 0xFF00) >> 8 = (raw >> 8) & 0xFF  [Bits 8-15]
+        # b = bit.band(raw, 0xFF) / 255
+        #   -> b * 255 = raw & 0xFF  [Bits 0-7]
+        
+        # WICHTIG: r, g, b sind Ro-Werte (0-255) von OpenCV, nicht normalisiert!
+        # WeakAura speichert normalisierte Werte (0.0-1.0), also müssen wir die Ro-Werte
+        # als normalisierte Werte interpretieren: r_norm = r / 255.0
+        
+        # Normalisiere BGR-Werte auf 0.0-1.0 (wie WeakAura sie speichert)
+        r_norm = r / 255.0
+        g_norm = g / 255.0
+        b_norm = b / 255.0
+        
+        # Rekonstruiere den 24-Bit-Wert
+        # r_norm * 255 gibt uns die oberen 8 Bits (Bits 16-23)
+        # g_norm * 255 gibt uns die mittleren 8 Bits (Bits 8-15)
+        # b_norm * 255 gibt uns die unteren 8 Bits (Bits 0-7)
+        raw_upper_8 = int(r_norm * 255)  # Bits 16-23
+        raw_middle_8 = int(g_norm * 255)  # Bits 8-15
+        raw_lower_8 = int(b_norm * 255)   # Bits 0-7
+        
+        # Rekonstruiere: (upper_8 << 16) | (middle_8 << 8) | lower_8
+        value_24bit = (raw_upper_8 << 16) | (raw_middle_8 << 8) | raw_lower_8
+        
+        if normalize:
+            # Skaliere auf 0.0 bis 1.0
+            # 24-Bit = 0 bis 16777215 (2^24 - 1)
+            return value_24bit / 16777215.0
+        else:
+            # Gib Ro-Wert zurück (für Koordinaten, die direkt als WoW-Koordinaten interpretiert werden)
+            return float(value_24bit)
+    
+    def decode_facing_pixel(self, pixel_bgr):
+        """Dekodiert einen Blickrichtung-Pixel und konvertiert zu Grad.
+        
+        Args:
+            pixel_bgr: BGR-Farbe als (B, G, R) Tupel oder numpy array
+            
+        Returns:
+            Blickrichtung in Grad (0.0 bis 360.0)
+        """
+        normalized = self.decode_24bit_pixel(pixel_bgr)
+        if normalized is None:
+            return None
+        
+        # WeakAura: GetPlayerFacing() gibt 0 bis 2π zurück
+        # Normalisiert auf 0.0-1.0, dann * 360° für Grad
+        # WICHTIG: GetPlayerFacing() gibt Winkel in Radian zurück, wo 0 = Norden
+        facing_degrees = normalized * 360.0
+        
+        # KORREKTUR: Osten und Westen sind um 180° verschoben
+        # Norden (0°) und Süden (180°) passen, aber Osten (90°) und Westen (270°) sind vertauscht
+        # Lösung: Wenn der Winkel im Osten/Westen-Bereich ist, um 180° verschieben
+        # Osten-Bereich: 45°-135° -> sollte 90° sein, aber zeigt ~270° (Westen)
+        # Westen-Bereich: 225°-315° -> sollte 270° sein, aber zeigt ~90° (Osten)
+        
+        # Prüfe ob wir im Osten/Westen-Bereich sind (45°-135° oder 225°-315°)
+        if (45.0 <= facing_degrees < 135.0) or (225.0 <= facing_degrees < 315.0):
+            # Verschiebe um 180°
+            facing_degrees = (facing_degrees + 180.0) % 360.0
+        
+        return facing_degrees
+    
+    def read_position_from_frame(self, frame):
+        """Liest die aktuelle Position (X, Y, Facing) aus dem Frame.
+        
+        Args:
+            frame: OpenCV Frame (BGR Format)
+            
+        Returns:
+            (x, y, facing) Tupel oder None bei Fehler
+        """
+        if frame is None:
+            return None
+        
+        try:
+            h, w = frame.shape[:2]
+            
+            # Prüfe ob Positionen innerhalb des Frames liegen
+            if (self.pixel_x_coord[0] < 0 or self.pixel_x_coord[0] >= w or 
+                self.pixel_x_coord[1] < 0 or self.pixel_x_coord[1] >= h):
+                return None
+            if (self.pixel_y_coord[0] < 0 or self.pixel_y_coord[0] >= w or 
+                self.pixel_y_coord[1] < 0 or self.pixel_y_coord[1] >= h):
+                return None
+            if (self.pixel_facing_coord[0] < 0 or self.pixel_facing_coord[0] >= w or 
+                self.pixel_facing_coord[1] < 0 or self.pixel_facing_coord[1] >= h):
+                return None
+            
+            # Lese Pixel an den konfigurierten Positionen
+            # Beachte: OpenCV verwendet (y, x) nicht (x, y)!
+            x_pixel = frame[self.pixel_x_coord[1], self.pixel_x_coord[0]]
+            y_pixel = frame[self.pixel_y_coord[1], self.pixel_y_coord[0]]
+            facing_pixel = frame[self.pixel_facing_coord[1], self.pixel_facing_coord[0]]
+            
+            # Dekodiere Werte
+            # Für Koordinaten: normalisieren, da WeakAuras normalisierte Werte (0.0-1.0) ausgeben
+            # Für Facing: normalisieren, da es ein Winkel ist
+            x_value_raw = self.decode_24bit_pixel(x_pixel, normalize=True)
+            y_value_raw = self.decode_24bit_pixel(y_pixel, normalize=True)
+            facing_value = self.decode_facing_pixel(facing_pixel)
+            
+            if x_value_raw is not None and y_value_raw is not None and facing_value is not None:
+                # Dekodierte Werte direkt zuweisen (keine Vertauschung mehr)
+                # Die WeakAura für X-Koordinate gibt X aus, Y-Koordinate gibt Y aus
+                self.current_x = x_value_raw
+                self.current_y = y_value_raw
+                self.current_facing = facing_value
+                return (self.current_x, self.current_y, facing_value)
+            
+            return None
+        except Exception as e:
+            print(f"[POSITION] Fehler beim Lesen der Position: {e}")
+            return None
+    
+    def drive_to_waypoint(self, target_x, target_y):
+        """Navigiert den Charakter zu einem Ziel-Waypoint.
+        
+        Args:
+            target_x: Ziel-X-Koordinate (normalisiert 0.0-1.0)
+            target_y: Ziel-Y-Koordinate (normalisiert 0.0-1.0)
+            
+        Returns:
+            True wenn Waypoint erreicht, False sonst
+            
+        BEKANNTES PROBLEM:
+        ------------------
+        Die Charakter-Ausrichtung funktioniert korrekt (Drehung zum Waypoint),
+        aber die Bewegung zum Ziel funktioniert nicht. Die W-Taste wird gedrückt,
+        aber der Charakter bewegt sich nicht ausreichend oder in die richtige
+        Richtung zum Waypoint.
+        """
+        # Prüfe zuerst ob Benutzer eingreift - dann pausiere Navigation
+        if self.check_user_intervention():
+            # Benutzer greift ein - stoppe Bewegung
+            if self.w_key_held:
+                self._hold_w_key(False)
+            if self.rmb_held:
+                self._hold_rmb(False)
+            return False
+        
+        # Berechne Distanz zum Ziel (beide Werte sind normalisiert 0.0-1.0)
+        dx = target_x - self.current_x
+        dy = target_y - self.current_y
+        distance = math.sqrt(dx * dx + dy * dy)
+        
+        # Prüfe ob Waypoint erreicht (keine Toleranz - muss exakt erreicht werden)
+        # Da exakte Gleichheit bei Floats nicht möglich ist, verwenden wir eine sehr kleine Schwelle
+        if distance < 0.0001:  # Praktisch 0, aber mit Float-Toleranz
+            # Stoppe Bewegung
+            if self.w_key_held:
+                self._hold_w_key(False)
+            if self.rmb_held:
+                self._hold_rmb(False)
+            return True
+        
+        # Berechne Zielwinkel (Target Angle) in Radian
+        # WICHTIG: In WoW ist Y=0 oben links, nicht unten links!
+        # In WoW: Norden = 0° (Y wird kleiner, dy<0), Osten = 90° (X wird größer, dx>0), 
+        #          Süden = 180° (Y wird größer, dy>0), Westen = 270° (X wird kleiner, dx<0)
+        # atan2(dx, -dy) gibt: Norden=0° (dx=0, dy<0 → atan2(0, 1) = 0°), 
+        #                        Osten=90° (dx>0, dy=0 → atan2(1, 0) = 90°),
+        #                        Süden=180° (dx=0, dy>0 → atan2(0, -1) = 180°),
+        #                        Westen=270° (dx<0, dy=0 → atan2(-1, 0) = -90° → 270°)
+        target_angle_rad = math.atan2(dx, -dy)  # -dy weil Y=0 oben ist
+        target_angle_deg = math.degrees(target_angle_rad)
+        
+        # Normalisiere auf 0-360 Grad
+        if target_angle_deg < 0:
+            target_angle_deg += 360.0
+        
+        # Berechne Winkel-Differenz zwischen aktuellem Facing und Zielwinkel
+        # WICHTIG: current_facing ist jetzt korrekt (mit Osten/Westen-Korrektur aus decode_facing_pixel)
+        angle_diff = target_angle_deg - self.current_facing
+        
+        # Normalisiere Winkel-Differenz auf -180 bis +180 Grad
+        # (um unnötig weite Drehungen zu vermeiden)
+        # WICHTIG: Korrekte Normalisierung - wenn Differenz > 180°, dann kürzeren Weg nehmen
+        while angle_diff > 180.0:
+            angle_diff -= 360.0
+        while angle_diff < -180.0:
+            angle_diff += 360.0
+        
+        # KEINE zusätzliche 180°-Korrektur mehr nötig!
+        # Die Korrektur für Osten/Westen erfolgt bereits in decode_facing_pixel
+        
+        # Debug-Ausgabe (alle 30 Frames)
+        # Werte als ganze Zahlen anzeigen (multipliziere mit 100 für WoW-Koordinaten)
+        if not hasattr(self, '_nav_debug_counter'):
+            self._nav_debug_counter = 0
+        self._nav_debug_counter += 1
+        if self._nav_debug_counter % 30 == 0:
+            # Zusätzliche Debug-Info: Zeige auch die rohen Werte vor Normalisierung
+            raw_diff = target_angle_deg - self.current_facing
+            print(f"[NAVIGATION] Pos: ({int(self.current_x * 100)}, {int(self.current_y * 100)}), "
+                  f"Ziel: ({int(target_x * 100)}, {int(target_y * 100)}), "
+                  f"Distanz: {distance * 100:.2f}, "
+                  f"Facing: {self.current_facing:.1f}°, "
+                  f"Zielwinkel: {target_angle_deg:.1f}°, "
+                  f"Roh-Differenz: {raw_diff:.1f}°, "
+                  f"Normalisierte Differenz: {angle_diff:.1f}°")
+        
+        # Drehe Charakter in Richtung Zielwinkel
+        # Wenn die Differenz zu groß ist, drehe zuerst
+        if abs(angle_diff) > 10.0:  # 10 Grad Toleranz (verdoppelt)
+            # WICHTIG: Rechte Maustaste KONTINUIERLICH drücken während Rotation
+            # Prüfe und drücke regelmäßig neu, um Fokus-Verlust zu verhindern
+            if not self.rmb_held:
+                self._hold_rmb(True)
+            else:
+                # Auch wenn bereits gedrückt, drücke regelmäßig neu um Fokus zu behalten
+                # Dies verhindert, dass die Maus den Fokus vom Spiel verliert
+                if not hasattr(self, '_last_rmb_refresh'):
+                    self._last_rmb_refresh = 0
+                current_time = time.time()
+                # Alle 0.5 Sekunden die rechte Maustaste neu drücken
+                if current_time - self._last_rmb_refresh > 0.5:
+                    # Kurz loslassen und wieder drücken, um Fokus zu behalten
+                    pydirectinput.mouseUp(button='right')
+                    time.sleep(0.01)
+                    pydirectinput.mouseDown(button='right')
+                    self._last_rmb_refresh = current_time
+            
+            # Konvertiere Winkel-Differenz in horizontale Mausbewegung
+            # Mittelweg: Faktor zwischen 1.5 und 3.0 für ausgewogene Geschwindigkeit
+            move_x = int(angle_diff * 2.2)  # Mittelweg zwischen 1.5 und 3.0
+            
+            # Begrenze Bewegung (Mittelweg für ausgewogene Rotation)
+            max_step = 18  # Mittelweg zwischen 12 und 30
+            move_x = max(min(move_x, max_step), -max_step)
+            
+            # Debug-Ausgabe für Rotation (reduziert)
+            if not hasattr(self, '_rotation_debug_counter'):
+                self._rotation_debug_counter = 0
+            self._rotation_debug_counter += 1
+            if self._rotation_debug_counter % 30 == 0:  # Alle 30 Frames (reduziert)
+                print(f"[ROTATION] Winkel-Differenz: {angle_diff:.1f}°, Mausbewegung: {move_x}px, RMB: {self.rmb_held}")
+            
+            # Kleine vertikale Variation für Realismus
+            move_y = random.randint(-1, 1)
+            
+            # WICHTIG: Verwende Smoothing für menschliche, smoothe Bewegung
+            # Aber mit angepassten Parametern für Rotation
+            self._execute_mouse_movement(move_x, move_y, use_smoothing=True)
+            
+            # W-Taste noch nicht drücken, erst wenn wir in die richtige Richtung schauen
+            if self.w_key_held:
+                self._hold_w_key(False)
+            
+            return False
+        else:
+            # Wir schauen bereits in die richtige Richtung - laufe nach vorne
+            # TODO: Bewegung funktioniert nicht - W-Taste wird gedrückt, aber Charakter bewegt sich nicht
+            # Mögliche Ursachen:
+            # - W-Taste wird nicht korrekt an WoW weitergegeben
+            # - Charakter ist blockiert oder kann sich nicht bewegen
+            # - Bewegung muss kontinuierlich sein, nicht nur einmalig
+            if not self.w_key_held:
+                self._hold_w_key(True)
+            
+            return False  # Noch nicht am Ziel
     
     def handle_range_state_change(self, new_range_state):
         """Verwaltet die W-Taste basierend auf Range-State.
@@ -938,6 +1242,9 @@ class WoWBot:
 
         # Initialisiere Human Input
         self.human_input = HumanInput()
+        
+        # Lade Waypoints aus Datei
+        self.load_waypoints_from_file("waypoints.txt")
     
     def _check_gui_support(self):
         """Prüft ob OpenCV GUI-Funktionen verfügbar sind."""
@@ -951,6 +1258,30 @@ class WoWBot:
             print(f"[WARNUNG] OpenCV GUI nicht verfügbar: {e}")
             print("[WARNUNG] Detection View wird nicht angezeigt.")
             return False
+    
+    def _bring_window_to_front(self, window_name):
+        """Bringt ein OpenCV-Fenster in den Vordergrund.
+        
+        Args:
+            window_name: Name des OpenCV-Fensters
+        """
+        if not WIN32_AVAILABLE:
+            return
+        
+        try:
+            # Finde das Fenster-Handle
+            hwnd = win32gui.FindWindow(None, window_name)
+            if hwnd:
+                # Stelle sicher, dass das Fenster nicht minimiert ist
+                if win32gui.IsIconic(hwnd):
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                
+                # Bringt das Fenster in den Vordergrund
+                win32gui.SetForegroundWindow(hwnd)
+                win32gui.BringWindowToTop(hwnd)
+        except Exception as e:
+            # Fehler beim Bringen des Fensters in den Vordergrund - nicht kritisch
+            pass
 
     def validate_region(self, region):
         """Validiert und korrigiert die Region, damit sie innerhalb des Bildschirms liegt."""
@@ -1109,6 +1440,136 @@ class WoWBot:
         
         return frame
 
+    def draw_position_pixels(self, frame):
+        """Zeichnet kleine Kreise an den Pixel-Positionen für X, Y, Facing.
+        
+        Args:
+            frame: OpenCV Frame (BGR Format)
+        """
+        if frame is None:
+            return frame
+        
+        try:
+            h, w = frame.shape[:2]
+            
+            # Zeichne Kreis für X-Koordinate (Lila)
+            x_pos = self.human_input.pixel_x_coord
+            if 0 <= x_pos[0] < w and 0 <= x_pos[1] < h:
+                cv2.circle(frame, (x_pos[0], x_pos[1]), 5, (255, 0, 255), 2)  # Lila (BGR)
+                cv2.putText(frame, "X", (x_pos[0] + 8, x_pos[1] + 5), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+            
+            # Zeichne Kreis für Y-Koordinate (Rot)
+            y_pos = self.human_input.pixel_y_coord
+            if 0 <= y_pos[0] < w and 0 <= y_pos[1] < h:
+                cv2.circle(frame, (y_pos[0], y_pos[1]), 5, (0, 0, 255), 2)  # Rot (BGR)
+                cv2.putText(frame, "Y", (y_pos[0] + 8, y_pos[1] + 5), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+            
+            # Zeichne Kreis für Facing (Beige/Gelb)
+            facing_pos = self.human_input.pixel_facing_coord
+            if 0 <= facing_pos[0] < w and 0 <= facing_pos[1] < h:
+                cv2.circle(frame, (facing_pos[0], facing_pos[1]), 5, (0, 200, 255), 2)  # Beige/Gelb (BGR)
+                cv2.putText(frame, "F", (facing_pos[0] + 8, facing_pos[1] + 5), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
+            
+        except Exception as e:
+            print(f"[POSITION] Fehler beim Zeichnen der Pixel-Positionen: {e}")
+        
+        return frame
+
+    def load_waypoints_from_file(self, filepath="waypoints.txt"):
+        """Lädt Waypoints aus einer Textdatei.
+        
+        Format: Eine Zeile pro Waypoint, Format: "x,y" oder "x, y"
+        Leere Zeilen und Zeilen mit # werden ignoriert.
+        
+        Args:
+            filepath: Pfad zur Waypoint-Datei
+        """
+        waypoints = []
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        full_path = os.path.join(script_dir, filepath)
+        
+        try:
+            if not os.path.exists(full_path):
+                print(f"[WAYPOINTS] Datei nicht gefunden: {full_path}")
+                print(f"[WAYPOINTS] Erstelle Standard-Waypoint-Datei mit Test-Koordinaten...")
+                # Erstelle Standard-Datei mit Test-Koordinaten
+                # Koordinaten müssen normalisiert sein (0.0-1.0)
+                # Beispiel: 50,86 in WoW-Koordinaten = 0.50, 0.86 (angenommen max 100)
+                with open(full_path, 'w') as f:
+                    f.write("# Waypoint-Datei für WoW Bot\n")
+                    f.write("# Format: x,y (eine Zeile pro Waypoint, normalisiert 0.0-1.0)\n")
+                    f.write("# Zeilen mit # werden ignoriert\n")
+                    f.write("# Beispiel: 50,86 in WoW = 0.50,0.86 (wenn max Koordinate = 100)\n")
+                    f.write("0.50,0.86\n")
+                    f.write("0.44,0.81\n")
+                print(f"[WAYPOINTS] Standard-Datei erstellt: {full_path}")
+            
+            with open(full_path, 'r') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    # Ignoriere leere Zeilen und Kommentare
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    # Parse Koordinaten
+                    try:
+                        parts = line.split(',')
+                        if len(parts) == 2:
+                            x = float(parts[0].strip())
+                            y = float(parts[1].strip())
+                            
+                            # Konvertiere WoW-Koordinaten zu normalisierten Werten, falls nötig
+                            # Wenn Werte > 1.0, dann sind es WoW-Koordinaten (angenommen max = 100)
+                            # Konvertiere: WoW-Koordinate / 100.0 = normalisierter Wert
+                            if x > 1.0 or y > 1.0:
+                                # Werte sind WoW-Koordinaten, normalisiere sie
+                                max_coord = 100.0  # Annahme: max WoW-Koordinate = 100
+                                x = x / max_coord
+                                y = y / max_coord
+                                print(f"[WAYPOINTS] Konvertiert WoW-Koordinaten zu normalisierten Werten")
+                            
+                            waypoints.append((x, y))
+                            print(f"[WAYPOINTS] Waypoint {len(waypoints)} geladen: ({x:.3f}, {y:.3f})")
+                        else:
+                            print(f"[WAYPOINTS] Warnung: Ungültiges Format in Zeile {line_num}: {line}")
+                    except ValueError as e:
+                        print(f"[WAYPOINTS] Fehler beim Parsen von Zeile {line_num}: {line} - {e}")
+            
+            if waypoints:
+                self.human_input.waypoints = waypoints
+                self.human_input.current_waypoint_index = 0
+                print(f"[WAYPOINTS] {len(waypoints)} Waypoints erfolgreich geladen!")
+            else:
+                print(f"[WAYPOINTS] Keine gültigen Waypoints in Datei gefunden!")
+                
+        except Exception as e:
+            print(f"[WAYPOINTS] Fehler beim Laden der Waypoint-Datei: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def save_waypoints_to_file(self, filepath="waypoints.txt"):
+        """Speichert Waypoints in eine Textdatei.
+        
+        Args:
+            filepath: Pfad zur Waypoint-Datei
+        """
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        full_path = os.path.join(script_dir, filepath)
+        
+        try:
+            with open(full_path, 'w') as f:
+                f.write("# Waypoint-Datei für WoW Bot\n")
+                f.write("# Format: x,y (eine Zeile pro Waypoint)\n")
+                f.write("# Zeilen mit # werden ignoriert\n")
+                for x, y in self.human_input.waypoints:
+                    f.write(f"{x},{y}\n")
+            print(f"[WAYPOINTS] {len(self.human_input.waypoints)} Waypoints gespeichert: {full_path}")
+        except Exception as e:
+            print(f"[WAYPOINTS] Fehler beim Speichern der Waypoint-Datei: {e}")
+
     def adjust_region_for_scanning(self, region):
         """Passt die Region an, um obere 5% und untere 15% auszuschließen."""
         if region is None:
@@ -1250,12 +1711,72 @@ class WoWBot:
             # Zeichne WeakAura-Position im Detection Frame
             detection_frame = self.draw_weakuara_position(detection_frame, range_state, pixel_color)
             
+            # Zeichne Position-Pixel im Detection Frame
+            detection_frame = self.draw_position_pixels(detection_frame)
+            
+            # Lese aktuelle Position aus Frame
+            position_data = self.human_input.read_position_from_frame(frame)
+            if position_data:
+                x, y, facing = position_data
+                # Debug-Ausgabe alle 30 Frames
+                # Werte als ganze Zahlen anzeigen (multipliziere mit 100 für WoW-Koordinaten)
+                if frame_count % 30 == 0:
+                    print(f"[POSITION] X={int(x * 100)}, Y={int(y * 100)}, Facing={facing:.1f}°")
+            
             # Prüfe ob YOLO ein Target erkannt hat
             has_detection = len(results[0].boxes) > 0
             
+            # --- MODUS-TRACKING für Wechsel-Meldungen ---
+            if not hasattr(self, '_last_bot_mode'):
+                self._last_bot_mode = None
+            
+            # --- WAYPOINT-NAVIGATION ---
+            # Nur wenn kein YOLO-Target vorhanden ist, navigiere zu Waypoints
+            navigating_to_waypoint = False
+            if not has_detection and len(self.human_input.waypoints) > 0:
+                # Prüfe ob wir noch einen aktiven Waypoint haben
+                if self.human_input.current_waypoint_index < len(self.human_input.waypoints):
+                    target_waypoint = self.human_input.waypoints[self.human_input.current_waypoint_index]
+                    target_x, target_y = target_waypoint
+                    
+                    # Navigiere zum Waypoint
+                    waypoint_reached = self.human_input.drive_to_waypoint(target_x, target_y)
+                    
+                    if waypoint_reached:
+                        print(f"[NAVIGATION] Waypoint {self.human_input.current_waypoint_index + 1} erreicht!")
+                        self.human_input.current_waypoint_index += 1
+                        
+                        # Wenn alle Waypoints erreicht, starte von vorne
+                        if self.human_input.current_waypoint_index >= len(self.human_input.waypoints):
+                            print("[NAVIGATION] Alle Waypoints erreicht! Starte von vorne.")
+                            self.human_input.current_waypoint_index = 0
+                    
+                    navigating_to_waypoint = True
+                else:
+                    # Keine Waypoints mehr, reset
+                    self.human_input.current_waypoint_index = 0
+            
+            # Bestimme aktuellen Bot-Modus
+            current_bot_mode = None
+            if navigating_to_waypoint:
+                current_bot_mode = "WAYPOINT_NAVIGATION"
+            elif self.human_input.target_search_mode:
+                current_bot_mode = "TARGET_SEARCH"
+            elif has_detection:
+                current_bot_mode = "COMBAT"
+            else:
+                current_bot_mode = "IDLE"
+            
+            # Meldung bei Modus-Wechsel
+            if self._last_bot_mode is not None and self._last_bot_mode != current_bot_mode:
+                print(f"[MODUS] Wechsel: {self._last_bot_mode} -> {current_bot_mode}")
+            self._last_bot_mode = current_bot_mode
+            
             # --- TARGET-SUCHE-LOGIK ---
-            # Prüfe ob Target vorhanden (basierend auf Range-Farbe)
-            self.human_input.handle_target_search(range_state, has_detection)
+            # Nur ausführen wenn nicht zu Waypoint navigiert wird
+            if not navigating_to_waypoint:
+                # Prüfe ob Target vorhanden (basierend auf Range-Farbe)
+                self.human_input.handle_target_search(range_state, has_detection)
             
             # Nur im Tracking-Modus die normale Logik ausführen
             if not self.human_input.target_search_mode:
@@ -1365,6 +1886,15 @@ class WoWBot:
                     new_h = int(h * scale)
                     resized = cv2.resize(detection_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                     cv2.imshow("Detection View", resized)
+                    
+                    # Bringt das Fenster in den Vordergrund
+                    # Beim ersten Frame: kleine Verzögerung, damit Fenster Zeit hat zu erstellen
+                    if frame_count == 1:
+                        time.sleep(0.1)  # Kurze Verzögerung für Fenster-Erstellung
+                        self._bring_window_to_front("Detection View")
+                    # Alle 60 Frames: Prüfe ob Fenster minimiert wurde und bringe es zurück
+                    elif frame_count % 60 == 0:
+                        self._bring_window_to_front("Detection View")
                     
                     if cv2.waitKey(1) & 0xFF == ord('q'): 
                         should_exit = True

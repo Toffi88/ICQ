@@ -98,19 +98,7 @@ class BaseRotation:
         """
         should_rotate = self.should_rotate(target_x, center_x, range_state, has_detection)
         
-        # Debug-Ausgabe für Range-State-Wechsel
-        if not hasattr(self, '_last_debug_state'):
-            self._last_debug_state = None
-        
-        if self._last_debug_state != range_state:
-            offset_x = abs(target_x - center_x) if target_x is not None else None
-            in_deadzone = offset_x <= self.center_deadzone_x if offset_x is not None else False
-            offset_str = f"{offset_x:.1f}px" if offset_x is not None else "None"
-            print(f"[ROTATION-DEBUG] {self.__class__.__name__}: Range-State={range_state}, "
-                  f"Target_X={target_x}, Center_X={center_x}, Offset={offset_str}, "
-                  f"InDeadzone={in_deadzone}, HasDetection={has_detection}, ShouldRotate={should_rotate}")
-            self._last_debug_state = range_state
-        
+        # Nur Meldung bei Rotation-Wechsel (Start/Stop), keine Debug-Ausgabe mehr
         if should_rotate:
             # Rotation sollte aktiv sein
             if not self.is_active:
